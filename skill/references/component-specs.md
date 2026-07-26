@@ -34,7 +34,33 @@ sketch=0;points=[[0,0,0],[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0,0],[0,1,0],[0.25,1
 |----------|-------|
 | Position | Below icon (`verticalLabelPosition=bottom;verticalAlign=top`) |
 | Alignment | `align=center` |
-| Format | `&amp;lt;name&amp;gt;<div>ServiceName</div>` |
+
+#### Label Value Encoding (CRITICAL)
+
+Labels use HTML inside the `value` attribute. The HTML tags must be XML-escaped ONCE.
+
+**Rule:** Take the desired HTML, then XML-escape `<` → `&lt;` and `>` → `&gt;`. Do NOT double-escape.
+
+```
+Desired rendering:  <b>order_ingest</b><div>SQS</div>
+XML value:          &lt;b&gt;order_ingest&lt;/b&gt;&lt;div&gt;SQS&lt;/div&gt;
+```
+
+**Wrong (double-escaped — renders as literal `&lt;b&gt;` text):**
+```
+&amp;lt;b&amp;gt;order_ingest&amp;lt;/b&amp;gt;  ← NEVER DO THIS
+```
+
+**For plain text labels (no bold/formatting),** just text with `<div>` for line breaks:
+```
+XML value:  order_ingest&lt;div&gt;SQS
+```
+
+**External box labels** follow the same rule:
+```
+Desired rendering:  <b>WMS</b><div>Warehouse Management</div>
+XML value:          &lt;b&gt;WMS&lt;/b&gt;&lt;div&gt;Warehouse Management&lt;/div&gt;
+```
 
 ---
 

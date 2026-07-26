@@ -82,22 +82,68 @@ When multiple edges target the same icon, each edge gets its own lane:
 - No two edges share the same routing column X when fanning out from one source
 - Each edge's `<Array as="points">` must have unique waypoint coordinates
 
-## Rule 4: Entry Point Distribution (Multi-Arrow Targets)
+## Rule 4: Target Entry Points (Left Edge)
 
-When multiple arrows hit the **same target icon**, entry points are distributed equally along the left edge:
+**All arrows enter the LEFT edge of the target icon** (`entryX=0`).
 
-| Incoming arrows | entryY values |
-|-----------------|---------------|
+### 4a: Equal distribution
+
+Entry points are equally distributed along the left edge. For an 80px icon:
+
+| Incoming arrows | entryY values | Pixel positions (from top) |
+|-----------------|---------------|----------------------------|
+| 1 | `0.5` | 40px (center) |
+| 2 | `0.25`, `0.75` | 20px, 60px |
+| 3 | `0.25`, `0.5`, `0.75` | 20px, 40px, 60px |
+| 4 | `0.167`, `0.389`, `0.611`, `0.833` | ~13px, 31px, 49px, 67px |
+
+Never stack two arrows on the same entry point.
+
+### 4b: Assignment by source position
+
+The entryY assigned to each source depends on where the source is relative to the target:
+
+| Source position | Gets entryY |
+|-----------------|-------------|
+| **Directly left** (same row Y) | `0.5` (center) — when total arrow count is odd (1,3,5...) |
+| **Upper-left** (source Y < target Y) | Upper entry points first (0.25, 0.167, etc.) |
+| **Lower-left** (source Y > target Y) | Lower entry points first (0.75, 0.833, etc.) |
+
+Example — 3 arrows to DynamoDB at y=320, h=78:
+```
+Lambda at y=160 (upper-left):   entryY=0.25  → entry at y=339.5
+Lambda at y=320 (same row):     entryY=0.50  → entry at y=359.0  ← directly left, odd count → center
+Lambda at y=800 (lower-left):   entryY=0.75  → entry at y=378.5
+```
+
+### 4c: Formula
+
+```
+entry_pixel_y = target.y + (entryY * target.height)
+waypoint_y must equal entry_pixel_y (see Rule 3a)
+```
+
+## Rule 5: Source Exit Points (Right Edge)
+
+**All arrows exit from the RIGHT edge of the source icon** (`exitX=1`).
+
+Same distribution principles as Rule 4, applied to the right edge:
+
+| Outgoing arrows | exitY values |
+|-----------------|-------------|
 | 1 | `0.5` |
 | 2 | `0.25`, `0.75` |
 | 3 | `0.25`, `0.5`, `0.75` |
-| 4 (extrapolated) | `0.167`, `0.389`, `0.611`, `0.833` |
 
-- **All entryX = 0** (left edge of target)
-- Never stack two arrows on the same entry point
-- Arrows always enter the **left edge**, exit the **right edge**
+Assignment by target position:
 
-## Rule 5: Exit Points from External Boxes
+| Target position | Gets exitY |
+|-----------------|-----------|
+| **Directly right** (same row Y) | `0.5` (center) — when total arrow count is odd |
+| **Upper-right** (target Y < source Y) | Upper exit points first |
+| **Lower-right** (target Y > source Y) | Lower exit points first |
+
+## Rule 6: Exit Points from External Boxes
 
 External boxes spanning multiple rows distribute exit points proportionally:
 
@@ -105,7 +151,7 @@ External boxes spanning multiple rows distribute exit points proportionally:
 - exitY aligns with the **center Y** of the target icon in each respective row
 - `exitX ≈ 1.0` (right edge)
 
-## Rule 6: Dashed Edges (Async / Event-Driven)
+## Rule 7: Dashed Edges (Async / Event-Driven)
 
 ```
 dashed=1;dashPattern=8 8;opacity=50
@@ -119,7 +165,22 @@ Semantics: represents asynchronous, event-driven, or non-blocking flows.
 
 ## Arrow Source/Target Anchoring Summary
 
-| Direction | Anchor |
-|-----------|--------|
-| Source exit | Right edge (`exitX=1`), centered (`exitY=0.5`) |
-| Target entry | Left edge (`entryX=0`), distributed (`entryY` varies) |
+| Direction | Anchor | Distribution |
+|-----------|--------|-------------|
+| Source exit | Right edge (`exitX=1`) | Evenly distributed (`exitY` varies — see Rule 5) |
+| Target entry | Left edge (`entryX=0`) | Evenly distributed (`entryY` varies — see Rule 4) |
+
+**Source always → RIGHT. Target always ← LEFT.**
+
+## Quick Reference: Entry/Exit Distribution
+
+For an 80px icon, the pixel positions from top:
+
+| Count | entryY/exitY | Pixels from top |
+|-------|-------------|-----------------|
+| 1 | 0.5 | 40px |
+| 2 | 0.25, 0.75 | 20px, 60px |
+| 3 | 0.25, 0.5, 0.75 | 20px, 40px, 60px |
+| 4 | 0.167, 0.389, 0.611, 0.833 | 13px, 31px, 49px, 67px |
+
+**Assignment:** Same-row source/target gets center (if odd count). Upper gets upper. Lower gets lower.

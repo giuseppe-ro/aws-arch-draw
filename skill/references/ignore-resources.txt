@@ -1,0 +1,3 @@
+kms
+sqs dlq
+iam role

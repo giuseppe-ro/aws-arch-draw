@@ -40,12 +40,47 @@ This happens when a single source fans out to two targets: one same-row (SNS) an
 When source and target are in different rows:
 
 ```
-source_right_edge → horizontal → routing_column → vertical → target_entry_row → horizontal → target_left_edge
+source_right_edge → horizontal → routing_column → vertical → target_entry_Y → horizontal → target_left_edge
 ```
 
 - A routing column is placed **between** the source's right edge and target's left edge
 - Default routing column `x=620` (between source right=560 and target left=720)
-- The vertical segment aligns with the target's `entryY` pixel position
+
+### Rule 3a: Waypoint Y MUST equal entryY pixel position (CRITICAL)
+
+The final horizontal segment into the target must be at the EXACT Y of the entry point.
+Compute the waypoint Y from the entryY fraction:
+
+```
+waypoint_y = target.y + (entryY * target.height)
+```
+
+**Wrong** (all edges route to center, then correct at the last moment):
+```
+# Two edges to same DynamoDB at (880, 320), h=78:
+# Edge A: entryY=0.25 → actual entry at y=339.5
+# Edge B: entryY=0.75 → actual entry at y=378.5
+
+# WRONG: both waypoint at y=359 (center)
+Edge A: → (800,520) → (800,359) → (880,339.5)   ← last segment slopes!
+Edge B: → (800,840) → (800,359) → (880,378.5)   ← last segment slopes!
+```
+
+**Correct** (each edge routes to its own entry Y):
+```
+# CORRECT: waypoint Y matches entry Y exactly
+Edge A: → (800,520) → (800,339.5) → (880,339.5)  ← final segment is horizontal
+Edge B: → (800,840) → (800,378.5) → (880,378.5)  ← final segment is horizontal
+```
+
+The horizontal approach to the target must be at the entry Y — never slope into the icon.
+
+### Rule 3b: One routing lane per edge
+
+When multiple edges target the same icon, each edge gets its own lane:
+- Different `entryY` → different `waypoint_y` → distinct horizontal approach
+- No two edges share the same routing column X when fanning out from one source
+- Each edge's `<Array as="points">` must have unique waypoint coordinates
 
 ## Rule 4: Entry Point Distribution (Multi-Arrow Targets)
 

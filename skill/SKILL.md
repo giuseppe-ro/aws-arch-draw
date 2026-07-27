@@ -143,23 +143,146 @@ Layout grid (from `references/layout-rules.md`):
 
 ### Step 6 — Generate and save .drawio XML
 
-Build the complete `<mxfile>` XML following every rule in the reference files.
+**ALL rules below are mandatory. Apply them while generating. Do not rely on reference files — these rules ARE the reference.**
 
-**Critical rules (see reference files for full detail):**
+#### 6.1 File Skeleton
 
-| Rule | Source |
-|------|--------|
-| No arrowheads on ANY edge | `arrow-rules.md` |
-| Arrow color = non-Lambda service in the connection | `color-rules.md` |
-| Same-row edges = perfectly straight horizontal | `arrow-rules.md` |
-| Multi-arrow targets: distribute entryY (0.25, 0.5, 0.75) | `arrow-rules.md` |
-| External boxes: `rounded=1;whiteSpace=wrap;html=1;` | `component-specs.md` |
-| Icons: 80×80, aspect=fixed, label below | `component-specs.md` |
-| Grid: 10px, snap all coordinates | `layout-rules.md` |
-| Title at top: `<font style="font-size: 24px;">&lt;TITLE&gt;</font>` | `layout-rules.md` |
+```xml
+<mxfile host="Electron" modified="2025-01-01T00:00:00.000Z" agent="pi" version="24.0.0" type="device">
+  <diagram name="Page-1" id="ARCHITECTURE">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2100" pageHeight="2400" background="light-dark(#FFFFFF,#FFFFFF)" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <!-- ALL cells here -->
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
+```
 
-**Generate order (back to front):**
-1. Section separators / dashed edges
+Grow `pageWidth`/`pageHeight` if the diagram needs more room.
+
+#### 6.2 Label Encoding (READ CAREFULLY — most common bug)
+
+The `value` attribute contains HTML, XML-escaped ONCE:
+
+```
+Desired:  <b>order_ingest</b><div>SQS</div>
+WRONG:    &amp;lt;b&amp;gt;order_ingest&amp;lt;/b&amp;gt;&amp;lt;div&amp;gt;SQS&amp;lt;/div&amp;gt;   ← double-escaped, renders as literal text!
+CORRECT:  &lt;b&gt;order_ingest&lt;/b&gt;&lt;div&gt;SQS&lt;/div&gt;
+```
+
+**After generating every mxCell, immediately check its `value=` attribute:** if you see `&amp;lt;` or `&amp;gt;` or `&amp;quot;` anywhere, STOP and fix it. Those should be `&lt;`, `&gt;`, `&quot;`.
+
+#### 6.3 Title Bar
+
+```xml
+<mxCell id="title" value="&lt;font style=&quot;font-size: 24px;&quot;&gt;PROJECT TITLE&lt;/font&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#232F3E;strokeWidth=1;" vertex="1" parent="1">
+  <mxGeometry x="0" y="0" width="2100" height="40" as="geometry" />
+</mxCell>
+```
+
+Note: `&quot;` not `&amp;quot;`.
+
+#### 6.4 Layout Grid
+
+| | Value |
+|---|-------|
+| Icon size (all AWS) | 80×80 |
+| Column X grid | 240, 480, 720, 960, 1200, 1440, 1680 (step 240) |
+| Row Y grid | 160, 480, 800, 1120, 1440, 1760, 2080 (step 320) |
+| Left external box | x=-80, w=160 |
+| Right external box | x=1920, w=160 |
+
+**All x/y coordinates must be multiples of 10.**
+
+**Flow direction is ALWAYS left→right.** Source icon must have a smaller X than target icon.
+
+#### 6.5 AWS Icon Template
+
+```xml
+<mxCell id="UNIQUE_ID" value="&lt;b&gt;Name&lt;/b&gt;&lt;div&gt;TYPE&lt;/div&gt;" style="sketch=0;outlineConnect=0;fontColor=#232F3E;strokeColor=#ffffff;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.SERVICE;fillColor=FILL_COLOR;" vertex="1" parent="1">
+  <mxGeometry x="X" y="Y" width="80" height="80" as="geometry" />
+</mxCell>
+```
+
+DynamoDB exception: use `shape=mxgraph.aws4.dynamodb_standard_access_table_class` (no `resourceIcon`, no `resIcon`). Add `gradientColor=none;pointerEvents=1;`. Size 80×80.
+
+#### 6.6 Service Colors
+
+| Service | fillColor |
+|---------|-----------|
+| SQS, SNS, EventBridge | `#E7157B` |
+| Lambda | `#ED7100` |
+| DynamoDB | `#C925D1` |
+
+#### 6.7 External Box Template
+
+```xml
+<mxCell id="ext-NAME" value="&lt;b&gt;Name&lt;/b&gt;&lt;div&gt;Description&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontColor=#232F3E;" vertex="1" parent="1">
+  <mxGeometry x="-80" y="Y" width="160" height="H" as="geometry" />
+</mxCell>
+```
+
+Height must span the rows it connects to.
+
+#### 6.8 Edge Style
+
+Every edge uses this base style (NO arrowheads — no `endArrow`):
+
+```
+edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;jumpStyle=arc
+```
+
+Plus color: add `strokeColor=light-dark(#HEX, #ededed)` where HEX is the non-Lambda service color (see 6.9).
+Dashed edges (async/event-driven): also add `dashed=1;dashPattern=8 8;opacity=50`.
+
+#### 6.9 Arrow Color Rule
+
+Arrow color = fillColor of the non-Lambda service in the connection. Lambda's orange is NEVER used as arrow color. External→AWS edges have no strokeColor (default black).
+
+| Edge | strokeColor |
+|------|-------------|
+| SQS → Lambda | `light-dark(#E7157B, #ededed)` |
+| Lambda → DynamoDB | `light-dark(#C925D1, #ededed)` |
+| Lambda → SNS | `light-dark(#E7157B, #ededed)` |
+| DynamoDB → Lambda | `light-dark(#C925D1, #ededed)` |
+| External → SQS | _(no strokeColor)_ |
+
+#### 6.10 Entry/Exit Distribution
+
+**All arrows exit RIGHT edge of source** (`exitX=1`), **enter LEFT edge of target** (`entryX=0`).
+
+For an 80px icon, distribute entry/exit points equally:
+
+| Arrow count | entryY / exitY | Pixels from top |
+|-------------|----------------|-----------------|
+| 1 | 0.5 | 40px |
+| 2 | 0.25, 0.75 | 20px, 60px |
+| 3 | 0.25, 0.5, 0.75 | 20px, 40px, 60px |
+
+**Assignment by position:**
+- Same-row source → center (0.5) if odd count
+- Upper-left source → upper entries first
+- Lower-left source → lower entries first
+
+#### 6.11 Edge Routing
+
+**Same-row edges:** no waypoints needed. `exitX=1;exitY=0.5;entryX=0;entryY=0.5` produces a straight horizontal line.
+
+**Cross-row edges:** use waypoints. The final waypoint Y MUST equal the target entry pixel Y:
+```
+waypoint_y = target.y + (entryY * target.height)
+```
+
+**No collinear segments:** no two edges may share the same (waypoint_x, waypoint_y). Offset by 20px if there's a collision.
+
+**External box fan-out:** each edge from an external box to a different target needs its own `exitY` matching the target's center Y.
+
+#### 6.12 Z-Order (generate in this order, back to front)
+
+1. Dashed/stream edges
 2. Title
 3. DynamoDB nodes
 4. SQS / SNS / EventBridge nodes
@@ -167,16 +290,30 @@ Build the complete `<mxfile>` XML following every rule in the reference files.
 6. External boxes
 7. Lambda nodes (front)
 
-**Save the file:**
+#### 6.13 MANDATORY PRE-SAVE CHECKLIST
 
-1. Create `docs/` folder if it doesn't exist:
+**Before writing the file, read back every mxCell and verify ALL of these:**
+
+- [ ] **NO `&amp;lt;` or `&amp;gt;` or `&amp;quot;` in ANY `value="..."` attribute.** These must be `&lt;`, `&gt;`, `&quot;`. Search the entire output.
+- [ ] **Every edge: source.x < target.x** (flow goes left→right). If source is to the right of target, the layout is wrong.
+- [ ] **Every edge: `entryX=0`** (enters left side of target) and **`exitX=1`** (exits right side of source).
+- [ ] **Every edge from an External box: has an explicit `exitY`** matching the target icon's center Y.
+- [ ] **Multi-arrow targets: entryY values are distinct and equally distributed** (e.g. 0.25/0.5/0.75 for 3 arrows).
+- [ ] **Cross-row edges: the final waypoint Y matches `target.y + entryY * target.height`**.
+- [ ] **No two edges share the same waypoint (x, y).** Offset by 20px minimum.
+- [ ] **All coordinates are multiples of 10.**
+- [ ] **No `endArrow` or `startArrow` on any edge.**
+
+**If ANY checkbox fails, fix the XML before saving. Do not skip.**
+
+#### 6.14 Save
+
 ```bash
 mkdir -p docs
 ```
 
-2. Write the XML to `docs/<dirname>-architecture.drawio` via bash.
+Write the XML to `docs/<dirname>-architecture.drawio` via bash. Then:
 
-3. Then save via MCP:
 ```
 drawio_set_page path: "docs/<dirname>-architecture.drawio" page: 0 content: "<mxGraphModel XML>"
 ```
@@ -188,6 +325,6 @@ Tell the user:
 Diagram saved: docs/<dirname>-architecture.drawio
 ```
 
-Then list any AWS resources that were found in graphify but filtered out by the ignore list.
+List any AWS resources found in graphify but filtered by the ignore list.
 
 Stop. Do NOT open the diagram in the editor unless the user explicitly asks.

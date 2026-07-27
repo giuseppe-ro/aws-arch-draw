@@ -75,12 +75,30 @@ Edge B: → (800,840) → (800,378.5) → (880,378.5)  ← final segment is hori
 
 The horizontal approach to the target must be at the entry Y — never slope into the icon.
 
-### Rule 3b: One routing lane per edge
+### Rule 3b: One routing column per edge — no collinear segments
 
-When multiple edges target the same icon, each edge gets its own lane:
-- Different `entryY` → different `waypoint_y` → distinct horizontal approach
-- No two edges share the same routing column X when fanning out from one source
-- Each edge's `<Array as="points">` must have unique waypoint coordinates
+**No two edges may share the same routing column X.** When two lines occupy the same X position, they become collinear (running on top of each other) instead of crossing with a visible arc jump.
+
+**Fan-out from one source to N targets:** each edge gets its own routing column X.
+```
+base_x = source.x + source.width + 40   # first routing column (40px right of source)
+# Each edge i (0, 1, 2, ...) routes through:
+routing_x = base_x + (i * 20)           # 20px separation between columns
+```
+
+Example — SNS at x=160 w=80 fanning to 4 SQS queues:
+```
+Edge 0: waypoint x=280  (160+80+40)
+Edge 1: waypoint x=300
+Edge 2: waypoint x=320
+Edge 3: waypoint x=340
+```
+
+**Fan-in from multiple sources to one target:** each edge gets its own waypoint_y (Rule 3a). The routing column X can be shared ONLY if each edge uses a different waypoint_y — they cross at different Y positions so they don't overlap.
+
+**Minimum separation:** 20px between any two parallel vertical routing segments.
+
+**If edges must cross (different X, different Y):** `jumpStyle=arc` will draw a visible arc jump. This is acceptable and expected. Collinear overlap is NEVER acceptable.
 
 ## Rule 4: Target Entry Points (Left Edge)
 
@@ -184,3 +202,18 @@ For an 80px icon, the pixel positions from top:
 | 4 | 0.167, 0.389, 0.611, 0.833 | 13px, 31px, 49px, 67px |
 
 **Assignment:** Same-row source/target gets center (if odd count). Upper gets upper. Lower gets lower.
+
+## Rule 8: No Line Overlap (Collinear Segments Forbidden)
+
+**Two edges must never share the same path segment.**
+
+- Crossing at different X/Y with `jumpStyle=arc` → visible arc jump → **acceptable**
+- Running collinear (same X AND overlapping Y range) → invisible overlap → **FORBIDDEN**
+- Running collinear (same Y AND overlapping X range) → invisible overlap → **FORBIDDEN**
+
+Before adding any edge, check all existing edges for collinear conflicts:
+1. Do they share the same routing column X? If yes, ensure their waypoint Y ranges don't overlap
+2. Do they share the same horizontal Y? If yes, ensure their X ranges don't overlap
+3. Minimum 20px separation between any two parallel segments
+
+If a conflict exists, offset the new edge's routing column by +20px until clear.

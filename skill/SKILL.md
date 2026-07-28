@@ -129,17 +129,39 @@ Exception: DynamoDB uses `shape=mxgraph.aws4.dynamodb_standard_access_table_clas
 
 From the merged graphify results, determine:
 
-1. **Rows** — each independent flow chain gets its own horizontal row
-2. **Columns** — left→right: external source → messaging → compute → database → messaging → external sink
-3. **Shared resources** — DynamoDB tables or SQS queues used by multiple flows appear ONCE,
-   positioned between the rows that use them
+1. **Rows** — each independent flow chain gets its own horizontal row. Row Y: 160, 480, 800, 1120, ... (step 320)
+2. **Columns** — left→right: external source → messaging → compute → database → messaging → external sink. Column X: 240, 480, 720, 960, 1200, 1440, 1680, ... (step 240)
+3. **Shared resources** — DynamoDB tables or SQS queues used by multiple flows appear ONCE, positioned between the rows that use them
 4. **External boxes** — upstream systems on the left (`x=-80`), downstream on the right (`x=1920`)
 
-Layout grid (from `references/layout-rules.md`):
-- Row Y: 160, 480, 800, 1120, ... (step 320)
-- Column X: 240, 480, 720, 960, 1200, 1440, 1680, ... (step 240)
-- Icons: 80×80
-- External box width: 160
+**CRITICAL: Every flow chain must continue RIGHTWARD.** When a resource (e.g. SQS) feeds into another Lambda, that Lambda must be placed at a column to the RIGHT of the source — never reset back to column x=240 mid-pipeline. Each step in the chain moves right by one column.
+
+Example — WRONG:
+```
+  SQS(x=1200) → Lambda(x=240)   ← resetting to left column, flow goes backwards!
+```
+
+Example — CORRECT:
+```
+  SQS(x=1200) → Lambda(x=1440)  ← continues rightward
+```
+
+Column assignment per resource type:
+| Role | Column X |
+|------|----------|
+| External (in) | -80 |
+| EventBridge / SNS (entry) | 240 |
+| SQS | 480 |
+| Lambda (ingest) | 720 |
+| DynamoDB (shared) | 960 |
+| Lambda (stream) | 1200 |
+| SQS/SNS (downstream) | 1440 |
+| Lambda (output) | 1680 |
+| External (out) | 1920 |
+
+Adapt columns based on what's actually present, but always maintain: source.x < target.x.
+
+Icons: 80×80. External box width: 160. All coordinates multiples of 10.
 
 ### Step 6 — Generate and save .drawio XML
 
@@ -294,13 +316,14 @@ waypoint_y = target.y + (entryY * target.height)
 
 **Before writing the file, read back every mxCell and verify ALL of these:**
 
-- [ ] **NO `&amp;lt;` or `&amp;gt;` or `&amp;quot;` in ANY `value="..."` attribute.** These must be `&lt;`, `&gt;`, `&quot;`. Search the entire output.
-- [ ] **Every edge: source.x < target.x** (flow goes left→right). If source is to the right of target, the layout is wrong.
-- [ ] **Every edge: `entryX=0`** (enters left side of target) and **`exitX=1`** (exits right side of source).
-- [ ] **Every edge from an External box: has an explicit `exitY`** matching the target icon's center Y.
-- [ ] **Multi-arrow targets: entryY values are distinct and equally distributed** (e.g. 0.25/0.5/0.75 for 3 arrows).
-- [ ] **Cross-row edges: the final waypoint Y matches `target.y + entryY * target.height`**.
-- [ ] **No two edges share the same waypoint (x, y).** Offset by 20px minimum.
+- [ ] **NO `&amp;lt;` or `&amp;gt;` or `&amp;quot;` in ANY `value="..."` attribute.** Must be `&lt;`, `&gt;`, `&quot;`.
+- [ ] **Every edge: `source.x < target.x`.** Flow goes left→right. If any source is to the right of its target, the layout is wrong — move the target to a larger X column.
+- [ ] **Every edge: `entryX=0`** (enters LEFT side of target). Never `entryX=1`. If you see `entryX=1`, it means the layout has a right→left flow — fix the layout, not the entry side.
+- [ ] **Every edge: `exitX=1`** (exits RIGHT side of source).
+- [ ] **Every edge from an External box: has `exitY=<value>` in the style** matching the target icon's center Y. No bare `mxPoint` for external edges.
+- [ ] **Multi-arrow targets: entryY values are ALL DISTINCT and correctly distributed.** For N arrows, use N equally-spaced values. Check: 2 arrows → 0.25, 0.75 (not both 0.5). 3 arrows → 0.25, 0.5, 0.75. 4 arrows → 0.167, 0.389, 0.611, 0.833. Count them — if two share the same value, fix it.
+- [ ] **Cross-row edges: the final waypoint Y = `target.y + entryY * target.height`.** Compute this for every cross-row edge. If any waypoint Y doesn't match, fix it.
+- [ ] **No two edges share the same (waypoint_x, waypoint_y).** Check every pair of waypoints. Even if X differs by 20 but Y is the same, ensure the vertical segments don't overlap.
 - [ ] **All coordinates are multiples of 10.**
 - [ ] **No `endArrow` or `startArrow` on any edge.**
 

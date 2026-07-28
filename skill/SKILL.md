@@ -129,24 +129,34 @@ Exception: DynamoDB uses `shape=mxgraph.aws4.dynamodb_standard_access_table_clas
 
 From the merged graphify results, determine:
 
-1. **Rows** — each independent flow chain gets its own horizontal row. Row Y: 160, 480, 800, 1120, ... (step 320)
-2. **Columns** — left→right: external source → messaging → compute → database → messaging → external sink. Column X: 240, 480, 720, 960, 1200, 1440, 1680, ... (step 240)
-3. **Shared resources** — DynamoDB tables or SQS queues used by multiple flows appear ONCE, positioned between the rows that use them
-4. **External boxes** — upstream systems on the left (`x=-80`), downstream on the right (`x=1920`)
+1. **Rows** — each independent flow chain gets its own horizontal row at 320px spacing. Row Y: 160, 480, 800, 1120, 1440, 1760, ... **Every distinct flow gets a full row — never cram multiple flows at 80px sub-spacing.** If 5 flows share one external source, they occupy 5 full rows (y=160, 480, 800, 1120, 1440), and the external box height expands to span them all.
+2. **Columns** — left→right. Column X: 240, 480, 720, 960, 1200, 1440, 1680, 1920, 2160, 2400, 2640, ... (step 240). Add more columns to the right as needed.
+3. **Shared resources** — DynamoDB tables used by multiple flows appear ONCE, positioned at a column to the right of the flows that write to them, at a Y between the rows that use them
+4. **External boxes** — ONLY at the left edge (`x=-80`) or right edge (past the rightmost icon + 80px). NEVER place an external box mid-diagram at a column X used by AWS icons.
 
-**CRITICAL: Every flow chain must continue RIGHTWARD.** When a resource (e.g. SQS) feeds into another Lambda, that Lambda must be placed at a column to the RIGHT of the source — never reset back to column x=240 mid-pipeline. Each step in the chain moves right by one column.
+**CRITICAL: Every flow chain must continue RIGHTWARD.** When a resource feeds into another, it must be at a larger X column — never reset to x=240 mid-pipeline.
+
+**CRITICAL: One flow = one full row.** Even when multiple flows share the same source (e.g. one external box feeds 5 SQS queues), each flow gets its own 320px row. The external box height grows to match.
 
 Example — WRONG:
 ```
-  SQS(x=1200) → Lambda(x=240)   ← resetting to left column, flow goes backwards!
+# 3 flows crammed into 160px (80px sub-spacing):
+Row y=480: SQS_order → Lambda_order
+Row y=560: SQS_receipt → Lambda_receipt    ← touching! labels collide!
+Row y=640: SQS_adjust → Lambda_adjust     ← touching!
+External box h=560 covers y=160..720
 ```
 
 Example — CORRECT:
 ```
-  SQS(x=1200) → Lambda(x=1440)  ← continues rightward
+# 3 flows, each gets 320px:
+Row y=480:  SQS_order → Lambda_order → DDB
+Row y=800:  SQS_receipt → Lambda_receipt → DDB
+Row y=1120: SQS_adjust → Lambda_adjust → DDB
+External box h=1280 covers y=160..1440
 ```
 
-Column assignment per resource type:
+Column assignment per resource type (add columns to the right as the chain grows):
 | Role | Column X |
 |------|----------|
 | External (in) | -80 |
@@ -157,9 +167,13 @@ Column assignment per resource type:
 | Lambda (stream) | 1200 |
 | SQS/SNS (downstream) | 1440 |
 | Lambda (output) | 1680 |
-| External (out) | 1920 |
+| DynamoDB (output) | 1920 |
+| Lambda (next stage) | 2160 |
+| SQS/SNS (next stage) | 2400 |
+| Lambda (final) | 2640 |
+| External (out) | rightmost_icon_x + 160 |
 
-Adapt columns based on what's actually present, but always maintain: source.x < target.x.
+Add more columns (step 240) as the chain grows. Never put an external box at an AWS icon column.
 
 Icons: 80×80. External box width: 160. All coordinates multiples of 10.
 
@@ -324,6 +338,8 @@ waypoint_y = target.y + (entryY * target.height)
 - [ ] **Multi-arrow targets: entryY values are ALL DISTINCT and correctly distributed.** For N arrows, use N equally-spaced values. Check: 2 arrows → 0.25, 0.75 (not both 0.5). 3 arrows → 0.25, 0.5, 0.75. 4 arrows → 0.167, 0.389, 0.611, 0.833. Count them — if two share the same value, fix it.
 - [ ] **Cross-row edges: the final waypoint Y = `target.y + entryY * target.height`.** Compute this for every cross-row edge. If any waypoint Y doesn't match, fix it.
 - [ ] **No two edges share the same (waypoint_x, waypoint_y).** Check every pair of waypoints. Even if X differs by 20 but Y is the same, ensure the vertical segments don't overlap.
+- [ ] **Row spacing: icons in different rows are at Y values that differ by 320px or more.** If two icons share the same X column but are only 80px apart vertically, they're crammed — spread them to proper rows.
+- [ ] **No external boxes mid-diagram.** External boxes only at x=-80 or at x = (rightmost_icon_x + 160).
 - [ ] **All coordinates are multiples of 10.**
 - [ ] **No `endArrow` or `startArrow` on any edge.**
 

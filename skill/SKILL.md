@@ -27,7 +27,6 @@ Do not ask what the user wants. Do not ask for confirmation.**
 
 Execute the full Workflow below. Only stop to tell the user when:
 - `graphify` is not installed
-- `graphify-out/graph.json` does not exist
 - After discovery, no supported AWS resources remain
 
 **Do NOT:**
@@ -43,12 +42,9 @@ Execute the full Workflow below. Only stop to tell the user when:
 
 ```bash
 graphify --version 2>&1 || { echo "STOP: graphify is not installed."; exit 1; }
-test -f graphify-out/graph.json || { echo "STOP: graphify-out/graph.json not found."; exit 1; }
 ```
 
 If `graphify --version` fails → tell user: `pip install graphifyy`, then stop.
-
-If `graphify-out/graph.json` missing → tell user: `Run /graphify . first, then re-run /aws-arch-draw.`, then stop.
 
 Do NOT run `/graphify` yourself. Do NOT read project source files.
 
@@ -80,7 +76,6 @@ Invoke via the `drawio` MCP server:
 
 ```bash
 graphify --version 2>&1
-test -f graphify-out/graph.json
 ```
 
 Stop with instructions if either fails.

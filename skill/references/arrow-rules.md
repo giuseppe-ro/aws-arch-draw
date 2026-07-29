@@ -169,17 +169,17 @@ External boxes spanning multiple rows distribute exit points proportionally:
 - exitY aligns with the **center Y** of the target icon in each respective row
 - `exitX ≈ 1.0` (right edge)
 
-## Rule 7: Dashed Edges (Async / Event-Driven)
+## Rule 7: Dashed Edges (Scheduled Triggers Only)
 
 ```
 dashed=1;dashPattern=8 8;opacity=50
 ```
 
-Used for:
-- **EventBridge → Lambda** (event-driven trigger)
-- **Lambda → DynamoDB** cross-row (async eventual consistency)
+**ONLY use dashed for scheduled/cron-triggered flows** (e.g. EventBridge rule that runs every N minutes). The dashed edge marks the entire scheduled flow chain: from the EventBridge trigger through every downstream resource it invokes.
 
-Semantics: represents asynchronous, event-driven, or non-blocking flows.
+Everything else — SQS polling, Lambda invocations, DDB Streams, Lambda→DDB writes, SNS publishes — is **always-on and uses solid lines.**
+
+DDB Streams are event-driven but always enabled — they are part of the main pipeline, not scheduled. They get solid lines.
 
 ## Arrow Source/Target Anchoring Summary
 

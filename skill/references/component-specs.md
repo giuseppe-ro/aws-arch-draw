@@ -80,9 +80,10 @@ rounded=1;whiteSpace=wrap;html=1;
 | Property | Value |
 |----------|-------|
 | Width | `160` (always) |
-| Height | Variable — `160` for 1 row, `480` for 3 rows, etc. |
+| Height | Variable — `240` for 1 row (80+80+80), `800` for 3 rows, etc. |
 | Left position | `x=-80` |
 | Right position | `x=1920` |
+| Y position | `y = icon_y - 80` (extends 80px above &amp; below same-row icon) |
 
 ### Value Format
 
@@ -95,11 +96,29 @@ rounded=1;whiteSpace=wrap;html=1;
 An external box must have its height match the vertical span of the rows it connects to:
 
 ```
-height = (connected_row_count × 320) - 160 + (extra_for_last_row)
+height = (last_row_icon_y - first_row_icon_y) + 240
 ```
 
-For a 1-row external: `h=160`
-For a 3-row external (spanning rows at y=160, 480, 800): `h=480`
+For a 1-row external: `h=240`
+For a 3-row external (spanning rows at y=160, 480, 800): `h=800`
+
+### Padding Rule (CRITICAL)
+
+External boxes must extend 80px above AND 80px below the icons they connect to.
+A single-row external box is therefore 240px tall (80 + 80 + 80):
+
+```
+external_box_y = icon_y - 80
+external_box_h = 240  (for single row)
+```
+
+Example: icon at y=160, h=80 → external box at y=80, h=240, spanning y=80..320
+
+For a multi-row external box spanning N rows:
+```
+y = first_row_icon_y - 80
+height = (last_row_icon_y - first_row_icon_y) + 240
+```
 
 ---
 

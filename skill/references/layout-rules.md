@@ -31,6 +31,7 @@ Grid positions: `240, 480, 720, 960, 1200, 1440, 1680, ...`
 | First row Y | **160** |
 | Row Y formula | `y_n = 160 + (n × 240)` |
 | Within-row vertical offset (stacked icons, same X) | **160 px** |
+| External box Y alignment | `y = icon_y - 80` (80px padding above &amp; below same-row icon) |
 
 Row grid: `160, 400, 640, 880, 1120, 1360, 1600, 1840, 2080, 2320, 2560, ...`
 

@@ -133,6 +133,16 @@ From the merged graphify results, determine:
 2. **Columns** — left→right. Column X: 240, 480, 720, 960, 1200, 1440, 1680, 1920, 2160, 2400, 2640, ... (step 240). Add more columns to the right as needed.
 3. **Shared resources** — DynamoDB tables used by multiple flows appear ONCE, positioned at a column to the right of the flows that write to them, at a Y between the rows that use them
 4. **External boxes** — ONLY at the left edge (`x=-80`) or right edge (past the rightmost icon + 80px). NEVER place an external box mid-diagram at a column X used by AWS icons.
+5. **External box Y position** — Single-row external boxes are 240px tall (80px above + 80px icon + 80px below). Place the external box at `y = icon_y - 80` so it extends 80px above and 80px below the icon. Example: icon at y=160 → external at y=80. For external boxes spanning multiple rows, use `y = first_row_icon_y - 80` and `height = last_row_icon_y - first_row_icon_y + 240` (80px padding above the first row and below the last row).
+6. **Fan-out row promotion** — When any node sends edges to 2+ downstream nodes in the same column, only the FIRST target stays on the current row with a straight horizontal edge (exitY=0.5). ALL additional targets MUST move to new rows below: `y = current_row_y + n × 240` where n=1,2,3… This guarantees every edge is either a straight horizontal or a clean L-shape — no edge will pass through another icon.
+
+   Example — Lambda at y=400 with two SNS targets at column 1200:
+   ```
+   sns-updates at y=400 (same row, exitY=0.5 → straight horizontal)
+   sns-cancel-req at y=640 (next row, exitY=0.75 → clean L-shape)
+   ```
+
+7. **External box height synthesis** — An external box's height must span ALL rows of icons it connects to (incoming OR outgoing). Scan every edge touching the external box, find the highest and lowest connected icon midY, and compute: `ext.y = lowest_icon_y - 80`, `ext.h = highest_icon_y - lowest_icon_y + 240`. Never use a fixed height — compute it from the actual row span.
 
 **CRITICAL: Every flow chain must continue RIGHTWARD.** When a resource feeds into another, it must be at a larger X column — never reset to x=240 mid-pipeline.
 
@@ -230,6 +240,7 @@ Note: `&quot;` not `&amp;quot;`.
 | Row Y grid | 160, 480, 800, 1120, 1440, 1760, 2080 (step 320) |
 | Left external box | x=-80, w=160 |
 | Right external box | x=1920, w=160 |
+| External box Y (80px padding above & below icons) | `y = icon_y - 80` (for 240px tall single-row box) |
 
 **All x/y coordinates must be multiples of 10.**
 
@@ -261,7 +272,11 @@ DynamoDB exception: use `shape=mxgraph.aws4.dynamodb_standard_access_table_class
 </mxCell>
 ```
 
-Height must span the rows it connects to.
+**Y positioning:** Set `y = icon_y - 80` so the external box extends 80px above and 80px below the icon. For a single-row external alongside an icon at y=160: `y=80`, `h=240`. Height must span the rows it connects to.
+
+**Multi-row external box formula:** `y = first_row_icon_y - 80`, `height = (last_row_icon_y - first_row_icon_y) + 240`.
+
+**CRITICAL — Height synthesis:** compute height from ALL edges touching the external box, not just the obvious ones. Scan every edge where source or target is an external box. Find the highest and lowest icon midY among connected icons. Height must span from the lowest icon top (minus 80) to the highest icon bottom (plus 80). Recompute after any row promotion.
 
 #### 6.8 Edge Style
 
@@ -272,7 +287,7 @@ edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;s
 ```
 
 Plus color: add `strokeColor=light-dark(#HEX, #ededed)` where HEX is the non-Lambda service color (see 6.9).
-Dashed edges (scheduled/cron triggers ONLY): also add `dashed=1;dashPattern=8 8;opacity=50`. Only EventBridge/cron-triggered flows use dashed — mark the entire scheduled chain (EventBridge → Lambda → DDB). Everything else is solid: SQS polling, Lambda invocations, DDB Streams, direct writes, SNS publishes are always-on.
+Dashed edges (async/event-driven): also add `dashed=1;dashPattern=8 8;opacity=50`.
 
 #### 6.9 Arrow Color Rule
 
@@ -298,10 +313,17 @@ For an 80px icon, distribute entry/exit points equally:
 | 2 | 0.25, 0.75 | 20px, 60px |
 | 3 | 0.25, 0.5, 0.75 | 20px, 40px, 60px |
 
+**Maximum 3 arrows per icon edge.** For 4+ arrows, spacing drops below 20px — split flows or add intermediate nodes.
+
 **Assignment by position:**
 - Same-row source → center (0.5) if odd count
 - Upper-left source → upper entries first
 - Lower-left source → lower entries first
+
+**Same-row edges MUST use exitY=0.5 and entryY=0.5** (straight horizontal line). Only offset exitY/entryY when:
+- The source has multiple outgoing edges (fan-out) — each additional edge gets a different exitY
+- The target has multiple incoming edges (fan-in) — each edge gets a different entryY
+- The edge crosses rows (non-zero vertical deviation needed)
 
 #### 6.11 Edge Routing
 
@@ -312,7 +334,18 @@ For an 80px icon, distribute entry/exit points equally:
 waypoint_y = target.y + (entryY * target.height)
 ```
 
-**No collinear segments:** no two edges may share the same (waypoint_x, waypoint_y). Offset by 20px if there's a collision.
+**Icon collision pre-check (MANDATORY before every edge):**
+
+Before finalizing any edge path, verify it avoids ALL icon bounding boxes:
+- For each **horizontal segment at Y**: no icon has [icon.y, icon.y+80] that includes Y AND [icon.x, icon.x+80] that overlaps the segment's X range
+- For each **vertical segment at X**: no icon has [icon.x, icon.x+80] that includes X AND [icon.y, icon.y+80] that overlaps the segment's Y range
+- Exclude the edge's own source and target icons from the check
+
+**If collision found**: promote the downstream target to a new row (fan-out row promotion, Step 5 rule 6). Never route an edge THROUGH an icon — it looks like a connection.
+
+**No collinear segments:** no two edges may share the same (waypoint_x, waypoint_y). Offset by 20px if there's a collision. **Parallel same-route edges must be ≥20px apart** in the perpendicular axis (see arrow-rules.md Rules 8, 11).
+
+**No edge-icon overlap:** every edge segment must avoid all icon bounding boxes. Route edges through the 160px inter-column/row gaps, never through icon columns. If a segment would pass through an icon, adjust routing column X or waypoint Y (see arrow-rules.md Rule 10).
 
 **External box fan-out:** each edge from an external box to a different target needs its own `exitY` matching the target's center Y.
 
@@ -335,11 +368,17 @@ waypoint_y = target.y + (entryY * target.height)
 - [ ] **Every edge: `entryX=0`** (enters LEFT side of target). Never `entryX=1`. If you see `entryX=1`, it means the layout has a right→left flow — fix the layout, not the entry side.
 - [ ] **Every edge: `exitX=1`** (exits RIGHT side of source).
 - [ ] **Every edge from an External box: has `exitY=<value>` in the style** matching the target icon's center Y. No bare `mxPoint` for external edges.
-- [ ] **Multi-arrow targets: entryY values are ALL DISTINCT and correctly distributed.** For N arrows, use N equally-spaced values. Check: 2 arrows → 0.25, 0.75 (not both 0.5). 3 arrows → 0.25, 0.5, 0.75. 4 arrows → 0.167, 0.389, 0.611, 0.833. Count them — if two share the same value, fix it.
+- [ ] **Multi-arrow targets: entryY values are ALL DISTINCT and correctly distributed.** For N arrows (max 3 per edge), use N equally-spaced symmetric values. 2 arrows → 0.25, 0.75. 3 arrows → 0.25, 0.5, 0.75. Max 3 arrows per icon edge — if a resource needs 4+ connections, split flows. Pairs sum to 1.0 (symmetry).
 - [ ] **Cross-row edges: the final waypoint Y = `target.y + entryY * target.height`.** Compute this for every cross-row edge. If any waypoint Y doesn't match, fix it.
+- [ ] **No edge overlap (Rule 8):** For every pair of edges, decompose into segments. No two parallel segments share same X with overlapping Y range, or same Y with overlapping X range. Same-route edges must be parallel and ≥20px apart. Intersections (perpendicular crossing at a point) are OK.
+- [ ] **Symmetric distribution (Rule 9):** For every icon with N>1 incoming/outgoing arrows, entryY/exitY values form mirror pairs (upper ↔ lower). Pairs sum to 1.0. Same-row source/target gets center (0.5) when N is odd.
+- [ ] **No edge passes through any icon (Rule 10):** For every edge segment, verify it avoids all icon bounding boxes (icon.x..icon.x+80, icon.y..icon.y+80). Exclude the edge's own source/target icons. Route through 160px inter-column gaps.
+- [ ] **Minimum 20px separation (Rule 11):** Vertical routing columns differ by ≥20px. Horizontal routing Y values differ by ≥20px. Entry/exit points have ≥20px pixel spacing (max 3 arrows per icon edge).
 - [ ] **No two edges share the same (waypoint_x, waypoint_y).** Check every pair of waypoints. Even if X differs by 20 but Y is the same, ensure the vertical segments don't overlap.
 - [ ] **Row spacing: icons in different rows are at Y values that differ by 240px (step = 80 icon + 160 gap = 2× icon height).** If two icons share the same X column but are only 80px apart, they're crammed — spread them to proper rows.
 - [ ] **No external boxes mid-diagram.** External boxes only at x=-80 or at x = (rightmost_icon_x + 160).
+- [ ] **Fan-out row promotion:** For every node with 2+ outgoing edges to same-column targets, only the FIRST target shares the source row (straight horizontal exitY=0.5). ALL additional targets must be on new rows at y = current_row_y + n×240. Rebuild the edge routing after promoting.
+- [ ] **External box height synthesis:** For each external box, scan ALL edges touching it. Find the highest and lowest connected icon midY. Height = (highest_midY - lowest_midY) + 160. If promoting a target to a new row increased the span, grow the external box height accordingly. Recompute AFTER row promotion.
 - [ ] **All coordinates are multiples of 10.**
 - [ ] **No `endArrow` or `startArrow` on any edge.**
 

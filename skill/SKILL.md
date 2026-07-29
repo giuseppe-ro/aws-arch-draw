@@ -129,7 +129,7 @@ Exception: DynamoDB uses `shape=mxgraph.aws4.dynamodb_standard_access_table_clas
 
 From the merged graphify results, determine:
 
-1. **Rows** — each independent flow chain gets its own horizontal row at 320px spacing. Row Y: 160, 480, 800, 1120, 1440, 1760, ... **Every distinct flow gets a full row — never cram multiple flows at 80px sub-spacing.** If 5 flows share one external source, they occupy 5 full rows (y=160, 480, 800, 1120, 1440), and the external box height expands to span them all.
+1. **Rows** — each independent flow chain gets its own horizontal row. Row Y: 160, 400, 640, 880, 1120, 1360, 1600, 1840, 2080, 2320, 2560, ... (step **240** = 80px icon + 160px gap = 2× icon height). **Every distinct flow gets a full 240px row — never cram multiple flows at sub-spacing.** If 5 flows share one external source, they occupy 5 full rows, and the external box height expands to span them all.
 2. **Columns** — left→right. Column X: 240, 480, 720, 960, 1200, 1440, 1680, 1920, 2160, 2400, 2640, ... (step 240). Add more columns to the right as needed.
 3. **Shared resources** — DynamoDB tables used by multiple flows appear ONCE, positioned at a column to the right of the flows that write to them, at a Y between the rows that use them
 4. **External boxes** — ONLY at the left edge (`x=-80`) or right edge (past the rightmost icon + 80px). NEVER place an external box mid-diagram at a column X used by AWS icons.
@@ -149,11 +149,11 @@ External box h=560 covers y=160..720
 
 Example — CORRECT:
 ```
-# 3 flows, each gets 320px:
-Row y=480:  SQS_order → Lambda_order → DDB
-Row y=800:  SQS_receipt → Lambda_receipt → DDB
-Row y=1120: SQS_adjust → Lambda_adjust → DDB
-External box h=1280 covers y=160..1440
+# 3 flows, each gets 240px row:
+Row y=400:  SQS_order → Lambda_order → DDB
+Row y=640:  SQS_receipt → Lambda_receipt → DDB
+Row y=880: SQS_adjust → Lambda_adjust → DDB
+External box h=960 covers y=160..1120
 ```
 
 Column assignment per resource type (add columns to the right as the chain grows):
@@ -272,7 +272,7 @@ edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;s
 ```
 
 Plus color: add `strokeColor=light-dark(#HEX, #ededed)` where HEX is the non-Lambda service color (see 6.9).
-Dashed edges (async/event-driven): also add `dashed=1;dashPattern=8 8;opacity=50`.
+Dashed edges (scheduled/cron triggers ONLY): also add `dashed=1;dashPattern=8 8;opacity=50`. Only EventBridge/cron-triggered flows use dashed — mark the entire scheduled chain (EventBridge → Lambda → DDB). Everything else is solid: SQS polling, Lambda invocations, DDB Streams, direct writes, SNS publishes are always-on.
 
 #### 6.9 Arrow Color Rule
 
@@ -338,7 +338,7 @@ waypoint_y = target.y + (entryY * target.height)
 - [ ] **Multi-arrow targets: entryY values are ALL DISTINCT and correctly distributed.** For N arrows, use N equally-spaced values. Check: 2 arrows → 0.25, 0.75 (not both 0.5). 3 arrows → 0.25, 0.5, 0.75. 4 arrows → 0.167, 0.389, 0.611, 0.833. Count them — if two share the same value, fix it.
 - [ ] **Cross-row edges: the final waypoint Y = `target.y + entryY * target.height`.** Compute this for every cross-row edge. If any waypoint Y doesn't match, fix it.
 - [ ] **No two edges share the same (waypoint_x, waypoint_y).** Check every pair of waypoints. Even if X differs by 20 but Y is the same, ensure the vertical segments don't overlap.
-- [ ] **Row spacing: icons in different rows are at Y values that differ by 320px or more.** If two icons share the same X column but are only 80px apart vertically, they're crammed — spread them to proper rows.
+- [ ] **Row spacing: icons in different rows are at Y values that differ by 240px (step = 80 icon + 160 gap = 2× icon height).** If two icons share the same X column but are only 80px apart, they're crammed — spread them to proper rows.
 - [ ] **No external boxes mid-diagram.** External boxes only at x=-80 or at x = (rightmost_icon_x + 160).
 - [ ] **All coordinates are multiples of 10.**
 - [ ] **No `endArrow` or `startArrow` on any edge.**

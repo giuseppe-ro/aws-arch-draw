@@ -27,12 +27,12 @@ Grid positions: `240, 480, 720, 960, 1200, 1440, 1680, ...`
 
 | Rule | Value |
 |------|-------|
-| Baseline row-to-row Y spacing | **320 px** |
+| Baseline row-to-row Y spacing | **240 px** (80px icon + 160px gap = 2× icon height) |
 | First row Y | **160** |
-| Row Y formula | `y_n = 160 + (n × 320)` |
+| Row Y formula | `y_n = 160 + (n × 240)` |
 | Within-row vertical offset (stacked icons, same X) | **160 px** |
 
-Row grid: `160, 480, 800, 1120, ...`
+Row grid: `160, 400, 640, 880, 1120, 1360, 1600, 1840, 2080, 2320, 2560, ...`
 
 ## Title Bar
 

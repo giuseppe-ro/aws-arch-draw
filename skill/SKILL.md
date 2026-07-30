@@ -123,43 +123,33 @@ Exception: DynamoDB uses `shape=mxgraph.aws4.dynamodb_standard_access_table_clas
 
 From the merged graphify results, determine:
 
-1. **Rows** — each independent flow chain gets its own horizontal row. Row Y: 160, 400, 640, 880, 1120, 1360, 1600, 1840, 2080, 2320, 2560, ... (step **240** = 80px icon + 160px gap = 2× icon height). **Every distinct flow gets a full 240px row — never cram multiple flows at sub-spacing.** If 5 flows share one external source, they occupy 5 full rows, and the external box height expands to span them all.
+1. **Rows** — each independent flow chain gets its own horizontal row. Row Y: 160, 320, 480, 640, 800, 960, 1120, 1280, 1440, 1600, ... (step **160** = 80px icon + 80px gap). **Every distinct flow gets a full 160px row — never cram multiple flows at sub-spacing.** If 5 flows share one external source, they occupy 5 full rows, and the external box height expands to span them all.
 2. **Columns** — left→right. Column X: 240, 480, 720, 960, 1200, 1440, 1680, 1920, 2160, 2400, 2640, ... (step 240). Add more columns to the right as needed.
 3. **Shared resources** — DynamoDB tables used by multiple flows appear ONCE. **Rightmost-writer rule:** place the DDB at `column_X = max(writer_column) + 240` so every writing edge is left→right. Row Y: between (or after) the rows that use it. If the rightmost writer is at column 1680, the DDB goes at column 1920 — not at a hardcoded column 960.
 4. **Fan-in handling** — When a single target (e.g. a shared DynamoDB table) receives edges from multiple sources at different columns, each incoming edge gets a distinct entryY (distributed per §6.10). The target must be placed at a column strictly greater than the rightmost source. If this causes a collision, promote the target to a new row.
-5. **Icon collision guard (MANDATORY before placing each icon)** — Check if any other icon already occupies the candidate (col_x, row_y). If occupied, advance the candidate row by +240 and recheck. Never place two icons at the same (x, y).
+5. **Icon collision guard (MANDATORY before placing each icon)** — Check if any other icon already occupies the candidate (col_x, row_y). If occupied, advance the candidate row by +160 and recheck. Never place two icons at the same (x, y).
 6. **External boxes** — ONLY at the left edge (`x=-80`) or right edge (past the rightmost icon + 80px). NEVER place an external box mid-diagram at a column X used by AWS icons. **IMPORTANT: An SNS topic that fans out to SQS queues via subscriptions is an AWS resource, NOT an external box.** Only systems outside the AWS account boundary (e.g. an upstream WMS, downstream consumers) go in external boxes. If graphify discovers `aws_sns_topic_subscription` resources connecting an SNS topic to SQS queues, render that SNS topic as a standard AWS icon node at column 240 — do NOT collapse it into the external box.
-7. **External box Y position** — Single-row external boxes are 240px tall (80px above + 80px icon + 80px below). Place the external box at `y = icon_y - 80` so it extends 80px above and 80px below the icon. Example: icon at y=160 → external at y=80. For external boxes spanning multiple rows, use `y = first_row_icon_y - 80` and `height = last_row_icon_y - first_row_icon_y + 240` (80px padding above the first row and below the last row).
-8. **Fan-out row promotion** — When any node sends edges to 2+ downstream nodes in the same column, only the FIRST target stays on the current row with a straight horizontal edge (exitY=0.5). ALL additional targets MUST move to new rows below: `y = current_row_y + n × 240` where n=1,2,3… This guarantees every edge is either a straight horizontal or a clean L-shape — no edge will pass through another icon.
+7. **External box Y position** — Single-row external boxes are 160px tall (40px above + 80px icon + 40px below). Place the external box at `y = icon_y - 40` so it extends 40px above and 40px below the icon. Example: icon at y=160 → external at y=120. For external boxes spanning multiple rows, use `y = first_row_icon_y - 40` and `height = last_row_icon_y - first_row_icon_y + 160` (40px padding above the first row and below the last row).
+8. **Fan-out row promotion** — When any node sends edges to 2+ downstream nodes in the same column, only the FIRST target stays on the current row with a straight horizontal edge (exitY=0.5). ALL additional targets MUST move to new rows below: `y = current_row_y + n × 160` where n=1,2,3… This guarantees every edge is either a straight horizontal or a clean L-shape — no edge will pass through another icon.
 
-   Example — Lambda at y=400 with two SNS targets at column 1200:
+   Example — Lambda at y=320 with two SNS targets at column 1200:
    ```
-   sns-updates at y=400 (same row, exitY=0.5 → straight horizontal)
-   sns-cancel-req at y=640 (next row, exitY=0.75 → clean L-shape)
+   sns-updates at y=320 (same row, exitY=0.5 → straight horizontal)
+   sns-cancel-req at y=480 (next row, exitY=0.75 → clean L-shape)
    ```
 
-9. **External box height synthesis** — An external box's height must span ALL rows of icons it connects to (incoming OR outgoing). Scan every edge touching the external box, find the highest and lowest connected icon midY, and compute: `ext.y = lowest_icon_y - 80`, `ext.h = highest_icon_y - lowest_icon_y + 240`. Never use a fixed height — compute it from the actual row span.
+9. **External box height synthesis** — An external box's height must span ALL rows of icons it connects to (incoming OR outgoing). Scan every edge touching the external box, find the highest and lowest connected icon midY, and compute: `ext.y = lowest_icon_y - 80`, `ext.h = highest_icon_y - lowest_icon_y + 160`. Never use a fixed height — compute it from the actual row span.
 
 **CRITICAL: Every flow chain must continue RIGHTWARD.** When a resource feeds into another, it must be at a larger X column — never reset to x=240 mid-pipeline.
 
-**CRITICAL: One flow = one full row.** Even when multiple flows share the same source (e.g. one external box feeds 5 SQS queues), each flow gets its own 240px row. The external box height grows to match.
+**CRITICAL: One flow = one full row.** Even when multiple flows share the same source (e.g. one external box feeds 5 SQS queues), each flow gets its own 160px row. The external box height grows to match.
 
-Example — WRONG:
+Example — CORRECT with 3 flows (step 160):
 ```
-# 3 flows crammed into 160px (80px sub-spacing):
-Row y=480: SQS_order → Lambda_order
-Row y=560: SQS_receipt → Lambda_receipt    ← touching! labels collide!
-Row y=640: SQS_adjust → Lambda_adjust     ← touching!
-External box h=560 covers y=160..720
-```
-
-Example — CORRECT:
-```
-# 3 flows, each gets 240px row:
-Row y=400:  SQS_order → Lambda_order → DDB
-Row y=640:  SQS_receipt → Lambda_receipt → DDB
-Row y=880: SQS_adjust → Lambda_adjust → DDB
-External box h=960 covers y=160..1120
+Row y=160:  SQS_order → Lambda_order → DDB
+Row y=320:  SQS_receipt → Lambda_receipt → DDB
+Row y=480: SQS_adjust → Lambda_adjust → DDB
+External box h=640 covers y=80..720
 ```
 
 **Dynamic column assignment (not hardcoded per role):**
@@ -242,10 +232,10 @@ Note: `&quot;` not `&amp;quot;`.
 |---|-------|
 | Icon size (all AWS) | 80×80 |
 | Column X grid | 240, 480, 720, 960, 1200, ... (step 240, grows rightwards as pipeline deepens; no fixed limit) |
-| Row Y grid | 160, 480, 800, 1120, 1440, 1760, 2080 (step 320) |
+| Row Y grid | 160, 320, 480, 640, 800, 960, 1120, ... (step 160) |
 | Left external box | x=-80, w=160 |
 | Right external box | `x = rightmost_icon_x + 160`, w=160 (dynamic, not hardcoded) |
-| External box Y (80px padding above & below icons) | `y = icon_y - 80` (for 240px tall single-row box) |
+| External box Y (40px padding above & below icons) | `y = icon_y - 40` (for 160px tall single-row box) |
 
 **All x/y coordinates must be multiples of 10.**
 
@@ -277,27 +267,21 @@ DynamoDB exception: use `shape=mxgraph.aws4.dynamodb_standard_access_table_class
 </mxCell>
 ```
 
-**Y positioning:** Set `y = icon_y - 80` so the external box extends 80px above and 80px below the icon. For a single-row external alongside an icon at y=160: `y=80`, `h=240`. Height must span the rows it connects to.
+**Y positioning:** Set `y = icon_y - 40` so the external box extends 40px above and 40px below the icon. For a single-row external alongside an icon at y=160: `y=120`, `h=160`. Height must span the rows it connects to.
 
-**Multi-row external box formula:** `y = first_row_icon_y - 80`, `height = (last_row_icon_y - first_row_icon_y) + 240`.
+**Multi-row external box formula:** `y = first_row_icon_y - 40`, `height = (last_row_icon_y - first_row_icon_y) + 160`.
 
 **CRITICAL — Height synthesis:** compute height from ALL edges touching the external box, not just the obvious ones. Scan every edge where source or target is an external box. Find the highest and lowest icon midY among connected icons. Height must span from the lowest icon top (minus 80) to the highest icon bottom (plus 80). Recompute after any row promotion.
 
 #### 6.8 Edge Style
 
-Every **solid (non-dashed) edge** uses this base style with arrowheads:
+Every edge uses this base style with arrowheads:
 
 ```
 edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;jumpStyle=arc;endArrow=classic
 ```
 
 Plus color: add `strokeColor=light-dark(#HEX, #ededed)` where HEX is the non-Lambda service color (see 6.9).
-
-Dashed edges (async/event-driven, e.g. DynamoDB streams): use the same base style but WITHOUT arrowheads, and add `dashed=1;dashPattern=8 8;opacity=50`:
-
-```
-edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;jumpStyle=arc;dashed=1;dashPattern=8 8;opacity=50
-```
 
 #### 6.9 Arrow Color Rule
 
@@ -361,13 +345,12 @@ Before finalizing any edge path, verify it avoids ALL icon bounding boxes:
 
 #### 6.12 Z-Order (generate in this order, back to front)
 
-1. Dashed/stream edges
-2. Title
-3. DynamoDB nodes
-4. SQS / SNS / EventBridge nodes
-5. Main-flow edges
-6. External boxes
-7. Lambda nodes (front)
+1. Title
+2. DynamoDB nodes
+3. SQS / SNS / EventBridge nodes
+4. Main-flow edges
+5. External boxes
+6. Lambda nodes (front)
 
 #### 6.13 MANDATORY PRE-SAVE CHECKLIST
 
@@ -385,13 +368,13 @@ Before finalizing any edge path, verify it avoids ALL icon bounding boxes:
 - [ ] **No edge passes through any icon (Rule 10):** For every edge segment, verify it avoids all icon bounding boxes (icon.x..icon.x+80, icon.y..icon.y+80). Exclude the edge's own source/target icons. Route through 160px inter-column gaps.
 - [ ] **Minimum 20px separation (Rule 11):** Vertical routing columns differ by ≥20px. Horizontal routing Y values differ by ≥20px. Entry/exit points have ≥20px pixel spacing (max 3 arrows per icon edge).
 - [ ] **No two edges share the same (waypoint_x, waypoint_y).** Check every pair of waypoints. Even if X differs by 20 but Y is the same, ensure the vertical segments don't overlap.
-- [ ] **Row spacing: icons in different rows are at Y values that differ by 240px (step = 80 icon + 160 gap = 2× icon height).** If two icons share the same X column but are only 80px apart, they're crammed — spread them to proper rows.
+- [ ] **Row spacing: icons in different rows are at Y values that differ by 160px (step = 80 icon + 80 gap).** If two icons share the same X column but are only 80px apart, they're crammed — spread them to proper rows.
 - [ ] **No external boxes mid-diagram.** External boxes only at x=-80 or at x = (rightmost_icon_x + 160).
 - [ ] **Fan-out row promotion:** For every node with 2+ outgoing edges to same-column targets, only the FIRST target shares the source row (straight horizontal exitY=0.5). ALL additional targets must be on new rows at y = current_row_y + n×240. Rebuild the edge routing after promoting.
-- [ ] **External box height synthesis:** For each external box, scan ALL edges touching it. Find the highest and lowest connected icon midY. Height = (highest_midY - lowest_midY) + 160. If promoting a target to a new row increased the span, grow the external box height accordingly. Recompute AFTER row promotion.
+- [ ] **External box height synthesis:** For each external box, scan ALL edges touching it. Find the highest and lowest connected icon midY. Height = (highest_midY - lowest_midY) + 80. If promoting a target to a new row increased the span, grow the external box height accordingly. Recompute AFTER row promotion.
 - [ ] **All coordinates are multiples of 10.**
-- [ ] **Every solid (non-dashed) edge has `endArrow=classic`.** Dashed/stream edges have no arrowhead (they are visually distinct via the dash pattern).
-- [ ] **No two icons share the same (x, y) position.** Scan all icon `<mxGeometry>` elements. If any two icons have the same x AND same y, the layout has a collision — advance the later one to a new row at y+240.
+- [ ] **Every edge has `endArrow=classic`.** No edge should be missing its arrowhead.
+- [ ] **No two icons share the same (x, y) position.** Scan all icon `<mxGeometry>` elements. If any two icons have the same x AND same y, the layout has a collision — advance the later one to a new row at y+160.
 - [ ] **No edge flows right→left.** After any icon repositioning, re-verify all edges: `source.x < target.x`. Recheck this after every layout adjustment.
 
 **If ANY checkbox fails, fix the XML before saving. Do not skip.**

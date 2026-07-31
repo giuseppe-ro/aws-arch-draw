@@ -147,6 +147,51 @@ def load_model(path):
     return {"title": title, "nodes": nodes, "edges": edges, "externals": externals}
 
 
+def load_ignore_set(ignore_path):
+    """Read the ignore-resources.txt list into a normalized set."""
+    ignored = set()
+    if ignore_path:
+        try:
+            with open(ignore_path) as f:
+                for line in f:
+                    line = line.strip().lower()
+                    if line:
+                        ignored.add(line)
+        except OSError:
+            pass
+    return ignored
+
+
+def prune_non_architectural(model, ignore_path):
+    """Remove AWS nodes that are DLQs, failure/redrive queues, test scaffolding,
+    or alerting/alarm resources — even if a hand-authored model included them.
+
+    Model node ids use dash form (e.g. `aws-sqs-queue-order-ingest-dlq`); markers
+    and ignore entries are underscore form (`_dlq`), so match against a normalized
+    underscore rendering of each id. Returns (pruned_model, pruned_ids)."""
+    ignored = load_ignore_set(ignore_path)
+
+    def is_plumbing(nid):
+        n = nid.lower().replace("-", "_")
+        if any(m in n for m in DLQ_MARKERS):
+            return True
+        n_norm = n.replace(" ", "_")
+        return any(ig and (ig in n or ig in n_norm or n_norm.endswith(ig)) for ig in ignored)
+
+    pruned = [n["id"] for n in model["nodes"] if is_plumbing(n["id"])]
+    if not pruned:
+        return model, []
+
+    keep = {n["id"] for n in model["nodes"]} - set(pruned)
+    ext_ids = {x["id"] for x in model.get("externals", [])}
+    return {
+        "title": model["title"],
+        "nodes": [n for n in model["nodes"] if n["id"] in keep],
+        "edges": [e for e in model["edges"] if (e["from"] in keep or e["from"] in ext_ids) and (e["to"] in keep or e["to"] in ext_ids)],
+        "externals": model["externals"],
+    }, pruned
+
+
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
@@ -342,8 +387,14 @@ def layout(model):
 
     for s in sorted(shared, key=lambda n: depth[n]):
         writers = [nodes[w] for w in incoming[s]]
-        lowest = min(w["y"] for w in writers)
-        candidate = lowest + ROW_STEP
+        # Place the shared sink below its LOWEST row of writers? No — with
+        # writers spanning many rows that lands it in the middle of the fan-in
+        # band, so a same-row writer's horizontal edge cuts through other icons
+        # on that row. Anchor it below the HIGHEST writer instead: every
+        # writer -> shared edge then routes cross-row (via waypoints) and can't
+        # pass through a sibling table.
+        highest = max(w["y"] for w in writers)
+        candidate = highest + ROW_STEP
         snapped = round(candidate / ROW_STEP) * ROW_STEP
         if snapped < candidate:
             snapped += ROW_STEP
@@ -825,7 +876,14 @@ IGNORED_PREFIX = (
     "aws_sqs_queue_policy", "aws_lambda_event_source_mapping", "aws_lambda_permission",
     "aws_ssm_parameter", "module.", "aws_cloudwatch_event_target", "data.",
 )
-DLQ_MARKERS = ("_dlq", "_failures", "smoke_", "fake_", "_dlq")
+# Substrings that mark a resource as non-architectural plumbing (never rendered):
+# DLQs, failure/redrive queues, smoke/fake test scaffolding, and alerting/
+# notification topics/alarms. Keep the underscore forms so they match Terraform
+# addresses like `aws_sqs_queue.order_ingest_dlq` or `aws_sns_topic.inventory_alerts`.
+DLQ_MARKERS = (
+    "_dlq", "_failures", "smoke_", "fake_",
+    "_alerts", "_alert", "_alarm", "notification",
+)
 
 
 def short_addr(addr):
@@ -1047,7 +1105,10 @@ def compute_authoritative(resources_path, ignore_path=None):
             return True
         if any(m in al for m in DLQ_MARKERS):
             return True
-        if any(ig and (ig in al or al.endswith(ig)) for ig in ignored):
+        # ignore-list entries may be written with spaces ("sqs dlq"); normalize to
+        # underscores so they match Terraform addresses (aws_sqs_queue.order_ingest_dlq).
+        al_norm = al.replace(" ", "_")
+        if any(ig and (ig in al or ig in al_norm or al_norm.endswith(ig)) for ig in ignored):
             return True
         return False
 
@@ -1238,7 +1299,11 @@ def validate_model_against_graph(model, resources_path, ignore_path=None):
 
 
 def find_resources(near=None):
-    """Locate graphify-out/resources.json for ground-truth validation."""
+    """Locate graphify-out/resources.json for ground-truth validation.
+
+    Tries the obvious spots first, then a shallow recursive scan so a graphify
+    run rooted in a subfolder (e.g. `deploy/graphify-out/resources.json`) is
+    still found instead of silently skipping validation."""
     base = os.path.dirname(os.path.abspath(near)) if near else os.getcwd()
     cands = [
         os.path.join(base, "graphify-out", "resources.json"),
@@ -1248,6 +1313,14 @@ def find_resources(near=None):
     for c in cands:
         if os.path.exists(c):
             return c
+    root = os.getcwd()
+    for dirpath, dirnames, filenames in os.walk(root):
+        # prune heavy/irrelevant trees
+        dirnames[:] = [d for d in dirnames
+                       if d not in ("node_modules", ".git", "bin", "obj",
+                                    "cache", "__pycache__", ".serverless")]
+        if os.path.basename(dirpath) == "graphify-out" and "resources.json" in filenames:
+            return os.path.join(dirpath, "resources.json")
     return None
 
 
@@ -1290,6 +1363,12 @@ def main():
         return
 
     model = load_model(path)
+
+    model, pruned = prune_non_architectural(model, ignore_path)
+    if pruned:
+        print("Pruned non-architectural nodes (DLQ/alert/test scaffolding):")
+        for pid in pruned:
+            print(f"  [PRUNED] {pid}")
 
     resources_path = None
     if "--graph" in flags:

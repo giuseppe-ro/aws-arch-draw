@@ -828,6 +828,11 @@ IGNORED_PREFIX = (
 DLQ_MARKERS = ("_dlq", "_failures", "smoke_", "fake_", "_dlq")
 
 
+def short_addr(addr):
+    """Stable short node id from a terraform resource address."""
+    return addr.replace(".", "-").replace("_", "-")
+
+
 def infer_type(address):
     for prefix, t in ADDRESS_TYPE:
         if address.startswith(prefix):
@@ -873,14 +878,11 @@ def read_trigger_edges(graph_path):
         lamb = next((r for r in refs if r.startswith("aws_lambda_function.")), None)
         if not lamb:
             continue
-        # map terraform addresses to the short ids used by the model
-        def short(addr):
-            return addr.replace(".", "-").replace("_", "-")
         if table:
-            edges.append((short(table), short(lamb), "stream"))
+            edges.append((short_addr(table), short_addr(lamb), "stream"))
             stream_triggers.append(f"{table} -> {lamb}")
         elif queue:
-            edges.append((short(queue), short(lamb), "sqs"))
+            edges.append((short_addr(queue), short_addr(lamb), "sqs"))
     # dedupe
     seen = set()
     dedup = []
@@ -892,10 +894,137 @@ def read_trigger_edges(graph_path):
     return dedup, stream_triggers
 
 
-def discover(resources_path, ignore_path=None):
-    """Build a draft model from graphify-out/resources.json + ignore list,
-    enriched with authoritative DDB-stream / SQS trigger edges from
-    graph.json (so stream edges never have to be guessed)."""
+def read_eventbridge_edges(graph_path):
+    """EventBridge schedule rules -> the Lambda functions they trigger.
+
+    Derived from `aws_cloudwatch_event_target.*` nodes, which `references` both
+    the `aws_cloudwatch_event_rule` and the target `aws_lambda_function`. This
+    is why `stock_sync` must not appear as an orphan: its schedule trigger is
+    real data flow and belongs in the model."""
+    edges = []
+    try:
+        with open(graph_path) as f:
+            g = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return edges
+    nodelabel = {n["id"]: n.get("label", n.get("id", "")) for n in g.get("nodes", [])}
+    links = g.get("links", [])
+    by_source = {}
+    for l in links:
+        by_source.setdefault(l.get("source"), []).append(l)
+    for n in g.get("nodes", []):
+        lbl = n.get("label", "")
+        if not lbl.startswith("aws_cloudwatch_event_target."):
+            continue
+        refs = [nodelabel.get(l.get("target")) for l in by_source.get(n["id"], [])
+                if l.get("relation") == "references"]
+        rule = next((r for r in refs if r.startswith("aws_cloudwatch_event_rule.")), None)
+        lamb = next((r for r in refs if r.startswith("aws_lambda_function.")), None)
+        if rule and lamb:
+            edges.append((short_addr(rule), short_addr(lamb)))
+    return list(dict.fromkeys(edges))
+
+
+def read_sns_subscriptions(graph_path):
+    """SNS fan-out edges + externally-fed SQS ingest queues.
+
+    For every `aws_sns_topic_subscription.<name>` node:
+      * subscribed to a local `aws_sns_topic.*` -> (sns, sqs) edge
+      * subscribed to an external topic (referenced via `var.*`/`data.*`) ->
+        the SQS queue is an ingest point fed from outside the account.
+
+    The external topic itself is NOT an AWS node in this project, so it must
+    not be rendered as a local `sns` node — it is represented by the upstream
+    external box instead."""
+    local_edges, ingest_queues = [], []
+    try:
+        with open(graph_path) as f:
+            g = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return local_edges, ingest_queues
+    nodelabel = {n["id"]: n.get("label", n.get("id", "")) for n in g.get("nodes", [])}
+    links = g.get("links", [])
+    by_source = {}
+    for l in links:
+        by_source.setdefault(l.get("source"), []).append(l)
+    for n in g.get("nodes", []):
+        lbl = n.get("label", "")
+        if not lbl.startswith("aws_sns_topic_subscription."):
+            continue
+        refs = [nodelabel.get(l.get("target")) for l in by_source.get(n["id"], [])
+                if l.get("relation") == "references"]
+        queue = next((r for r in refs if r.startswith("aws_sqs_queue.")), None)
+        if not queue:
+            continue
+        local_topic = next((r for r in refs if r.startswith("aws_sns_topic.")), None)
+        if local_topic:
+            local_edges.append((short_addr(local_topic), short_addr(queue)))
+        elif any(r.startswith(("var.", "data.")) for r in refs):
+            ingest_queues.append(short_addr(queue))
+    return list(dict.fromkeys(local_edges)), list(dict.fromkeys(ingest_queues))
+
+
+def read_iam_write_edges(graph_path):
+    """Lambda -> DynamoDB write edges inferred from IAM policy documents.
+
+    `data.aws_iam_policy_document.<lambda-name>` referencing an
+    `aws_dynamodb_table.*` => the lambda is granted access to that table
+    (a write). The source table of a DDB-stream trigger is EXCLUDED — that
+    lambda reads the stream, it does not write the table (adding it would
+    create a reversed edge / cycle)."""
+    edges = []
+    try:
+        with open(graph_path) as f:
+            g = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return edges
+    nodelabel = {n["id"]: n.get("label", n.get("id", "")) for n in g.get("nodes", [])}
+    links = g.get("links", [])
+    by_source = {}
+    for l in links:
+        by_source.setdefault(l.get("source"), []).append(l)
+
+    # DDB-stream source tables -> the lambda that reads each stream
+    stream_sources = set()
+    for n in g.get("nodes", []):
+        lbl = n.get("label", "")
+        if not lbl.startswith("aws_lambda_event_source_mapping."):
+            continue
+        refs = [nodelabel.get(l.get("target")) for l in by_source.get(n["id"], [])
+                if l.get("relation") == "references"]
+        table = next((r for r in refs if r.startswith("aws_dynamodb_table.")), None)
+        lamb = next((r for r in refs if r.startswith("aws_lambda_function.")), None)
+        if table and lamb:
+            stream_sources.add((table, lamb))
+
+    for n in g.get("nodes", []):
+        lbl = n.get("label", "")
+        prefix = "data.aws_iam_policy_document."
+        if not lbl.startswith(prefix):
+            continue
+        name = lbl[len(prefix):]
+        lambda_name = name[:-4] if name.endswith("_sqs") else name
+        lamb = f"aws_lambda_function.{lambda_name}"
+        refs = [nodelabel.get(l.get("target")) for l in by_source.get(n["id"], [])
+                if l.get("relation") == "references"]
+        for table in (r for r in refs if r.startswith("aws_dynamodb_table.")):
+            if (table, lamb) in stream_sources:
+                continue
+            edges.append((short_addr(lamb), short_addr(table)))
+    return list(dict.fromkeys(edges))
+
+
+def compute_authoritative(resources_path, ignore_path=None):
+    """Build the authoritative AWS node + edge inventory from graphify.
+
+    Returns (nodes, aws_edges, ingest_queues, stream_triggers):
+      nodes: list of {id, name, type} for every supported, non-ignored resource
+      aws_edges: set of (from, to) AWS->AWS data-flow edges (triggers, DDB
+                 streams, EventBridge rules, SNS->SQS fan-out, IAM-derived
+                 Lambda->DDB writes)
+      ingest_queues: ids of SQS queues subscribed to an external SNS topic
+      stream_triggers: human-readable "table -> lambda" DDB stream triggers
+    """
     with open(resources_path) as f:
         data = json.load(f)
 
@@ -912,6 +1041,8 @@ def discover(resources_path, ignore_path=None):
 
     def is_ignored(addr):
         al = addr.lower()
+        if al.startswith("aws_cloudwatch_event_rule"):
+            return False  # EventBridge schedules render as nodes
         if any(al.startswith(p) for p in IGNORED_PREFIX):
             return True
         if any(m in al for m in DLQ_MARKERS):
@@ -929,46 +1060,95 @@ def discover(resources_path, ignore_path=None):
         t = infer_type(addr)
         if t is None or is_ignored(addr):
             continue
-        # stable short id from the resource address
-        short = addr.replace(".", "-").replace("_", "-")
-        nid_out = short
+        # stable short id from the resource address — the model must keep these
+        nid_out = short_addr(addr)
         node_type[nid_out] = t
         node_names[nid_out] = addr.split(".")[-1]
         id2addr[nid] = nid_out
 
     nodes = [{"id": i, "name": node_names[i], "type": node_type[i]} for i in node_type]
-    edges = []
-    seen = set()
+
+    aws_edges = set()
     for e in data.get("edges", []):
         src = id2addr.get(e.get("source"))
         tgt = id2addr.get(e.get("target"))
         if not src or not tgt or src == tgt:
             continue
-        if (src, tgt) in seen:
-            continue
-        seen.add((src, tgt))
-        edges.append({"from": src, "to": tgt})
+        aws_edges.add((src, tgt))
 
-    # enrich with authoritative trigger edges from graph.json (same dir)
     graph_path = os.path.join(os.path.dirname(os.path.abspath(resources_path)),
                               "graph.json")
+
+    # SQS->Lambda + DDB-stream triggers (event source mappings) — ground truth
     trig_edges, stream_triggers = read_trigger_edges(graph_path)
-    for frm, tgt, kind in trig_edges:
-        if frm in node_type and tgt in node_type and (frm, tgt) not in seen:
-            seen.add((frm, tgt))
-            edges.append({"from": frm, "to": tgt})
+    for frm, tgt, _kind in trig_edges:
+        if frm in node_type and tgt in node_type:
+            aws_edges.add((frm, tgt))
+
+    # EventBridge schedule rules -> lambda
+    for frm, tgt in read_eventbridge_edges(graph_path):
+        if frm in node_type and tgt in node_type:
+            aws_edges.add((frm, tgt))
+
+    # SNS -> SQS fan-out for local topics
+    local_sns_edges, ingest_queues = read_sns_subscriptions(graph_path)
+    for frm, tgt in local_sns_edges:
+        if frm in node_type and tgt in node_type:
+            aws_edges.add((frm, tgt))
+    # only queues that survived filtering (no DLQ/test scaffolding) are ingest
+    ingest_queues = [q for q in ingest_queues if q in node_type]
+
+    # Lambda -> DDB writes from IAM policy documents
+    for frm, tgt in read_iam_write_edges(graph_path):
+        if frm in node_type and tgt in node_type:
+            aws_edges.add((frm, tgt))
+
+    return nodes, aws_edges, ingest_queues, stream_triggers
+
+
+def discover(resources_path, ignore_path=None):
+    """Build a draft model from graphify-out/resources.json + graph.json.
+
+    Every node id and every AWS->AWS edge in the draft is authoritative ground
+    truth (triggers, DDB streams, EventBridge rules, SNS->SQS fan-out, and
+    IAM-derived Lambda->DDB writes). Queues subscribed to an external SNS topic
+    get an auto-derived `ext-upstream` external so ingest entry points are never
+    left dangling. The model may only rename/describe externals, add downstream
+    externals + their boundary edges, and set the title."""
+    nodes, aws_edges, ingest_queues, stream_triggers = compute_authoritative(
+        resources_path, ignore_path)
+
+    edges = [{"from": f, "to": t} for f, t in sorted(aws_edges)]
+
+    externals = []
+    if ingest_queues:
+        externals.append({
+            "id": "ext-upstream",
+            "name": "Upstream SNS publisher",
+            "description": "External system publishing to SQS ingest queues "
+                           "(auto-derived from SNS subscriptions — rename to the "
+                           "real publisher, e.g. adapter)",
+            "side": "left",
+        })
+        for q in sorted(ingest_queues):
+            edges.append({"from": "ext-upstream", "to": q})
+
+    with open(resources_path) as f:
+        data = json.load(f)
 
     draft = {
         "title": str(data.get("title") or "Architecture"),
         "nodes": nodes,
         "edges": edges,
-        "externals": [],
+        "externals": externals,
         "_draft": True,
-        "_note": "Draft from resources.json + graph.json event source mappings. "
-                 "Add externals + external boundaries + any Lambda->DDB write "
-                 "edges missing from resources.json. DDB stream triggers are "
-                 "already included from graph.json — do NOT guess or add new "
-                 "DDB->Lambda edges. Remove this note.",
+        "_note": "Draft from resources.json + graph.json. Node ids are the "
+                 "authoritative short ids — KEEP them verbatim. AWS->AWS edges "
+                 "(triggers, DDB streams, EventBridge rules, SNS->SQS fan-out, "
+                 "IAM-derived Lambda->DDB writes) are ground truth: do NOT remove, "
+                 "re-target, or invent any. Only: set the title, rename/describe "
+                 "externals, add downstream externals + their boundary edges. Do "
+                 "NOT add or replace AWS nodes or AWS->AWS edges. Remove this note.",
         "_stream_triggers": stream_triggers,
     }
     return draft
@@ -1011,15 +1191,76 @@ def model_warnings(model):
     return warns
 
 
+def validate_model_against_graph(model, resources_path, ignore_path=None):
+    """Diff the model's AWS nodes/edges against graphify ground truth.
+
+    Returns (errors, warns). A hard error means: a fabricated AWS node (an id
+    that is not a graphify resource), an AWS->AWS edge graphify does not
+    support, or a missing authoritative edge between two nodes the model
+    already includes. Warnings are review points for external-boundary edges.
+    """
+    auth_nodes, auth_edges, ingest_queues, _ = compute_authoritative(
+        resources_path, ignore_path)
+    auth_node_ids = {n["id"] for n in auth_nodes}
+    errors, warns = [], []
+
+    model_ids = {n["id"] for n in model["nodes"]}
+    ext_ids = {x["id"] for x in model["externals"]}
+
+    for nid in sorted(model_ids - auth_node_ids):
+        errors.append(f"node '{nid}' is not a graphify resource (fabricated). "
+                      f"Only use ids from the --discover draft.")
+
+    model_aws_edges = set()
+    for e in model["edges"]:
+        frm, to = e["from"], e["to"]
+        if frm in model_ids and to in model_ids:
+            model_aws_edges.add((frm, to))
+
+    for frm, to in sorted(model_aws_edges - auth_edges):
+        errors.append(f"edge '{frm} -> {to}' has no graphify support. "
+                      f"Check the real data flow — the discover draft is ground "
+                      f"truth (triggers, EventBridge rules, SNS->SQS fan-out, "
+                      f"IAM-derived Lambda->DDB writes).")
+
+    for frm, to in sorted(auth_edges):
+        if frm in model_ids and to in model_ids and (frm, to) not in model_aws_edges:
+            errors.append(f"missing authoritative edge '{frm} -> {to}' — graphify "
+                          f"shows this connection between two nodes you included; "
+                          f"add it to the model.")
+
+    for e in model["edges"]:
+        frm, to = e["from"], e["to"]
+        if frm in ext_ids and to in model_ids and to not in ingest_queues:
+            warns.append(f"external '{frm}' -> '{to}': '{to}' is not an "
+                         f"externally-fed SQS ingest queue — verify this boundary edge.")
+    return errors, warns
+
+
+def find_resources(near=None):
+    """Locate graphify-out/resources.json for ground-truth validation."""
+    base = os.path.dirname(os.path.abspath(near)) if near else os.getcwd()
+    cands = [
+        os.path.join(base, "graphify-out", "resources.json"),
+        os.path.join(base, "resources.json"),
+        os.path.join(os.getcwd(), "graphify-out", "resources.json"),
+    ]
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return None
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
 
+    base = os.path.dirname(os.path.abspath(__file__))
+    ignore_path = os.path.join(base, "..", "references", "ignore-resources.txt")
+
     if sys.argv[1] == "--discover":
         resources_path = sys.argv[2] if len(sys.argv) > 2 else "graphify-out/resources.json"
-        base = os.path.dirname(os.path.abspath(__file__))
-        ignore_path = os.path.join(base, "..", "references", "ignore-resources.txt")
         draft = discover(resources_path, ignore_path)
         stream_triggers = draft.pop("_stream_triggers", [])
         draft.pop("_draft", None)
@@ -1049,6 +1290,25 @@ def main():
         return
 
     model = load_model(path)
+
+    resources_path = None
+    if "--graph" in flags:
+        resources_path = flags[flags.index("--graph") + 1]
+    else:
+        resources_path = find_resources(path)
+    gv_errors, gv_warns = [], []
+    if resources_path:
+        gv_errors, gv_warns = validate_model_against_graph(
+            model, resources_path, ignore_path)
+        if gv_errors:
+            print("Model does not match graphify ground truth:")
+            for e in gv_errors:
+                print(f"  [FAIL] {e}")
+            sys.exit(1)
+    else:
+        print("  (no graphify-out/resources.json found — skipping "
+              "ground-truth validation)")
+
     warns = model_warnings(model)
     nodes, ext, edges = layout(model)
     xml_text = generate_xml(model, nodes, ext, edges)
@@ -1059,9 +1319,11 @@ def main():
             print(f"  [FAIL] {e}")
         sys.exit(1)
 
-    if warns:
+    if warns or gv_warns:
         print("Warnings (review these — may indicate a model error):")
         for w in warns:
+            print(f"  [WARN] {w}")
+        for w in gv_warns:
             print(f"  [WARN] {w}")
 
     if check_only:

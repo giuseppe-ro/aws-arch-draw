@@ -1,64 +1,59 @@
 # Graphify Discovery Strategy
 
-The skill discovers architecture ONLY via graphify queries against an existing `graphify-out/graph.json`.
-Never read project source files. Never hardcode service names.
+The skill discovers architecture via graphify. Never read project source files.
+Never hardcode service names.
 
-## Query Approach
+## Fast path — `graphify-out/resources.json`
 
-Run queries in order. Merge results. If any query is truncated (`X of Y nodes`), raise `--budget`
-or split the query before continuing — truncated output discards data.
+Graphify already emits a structured, machine-readable inventory at
+`graphify-out/resources.json`:
 
-### Phase A — Resource Inventory
-
-Get a broad inventory of all AWS resources in the project:
-
-```
-graphify query "list all AWS services and resources in this project. For each one, give its type (Lambda, SQS, SNS, DynamoDB, EventBridge, API Gateway, S3, Kinesis, Step Functions, ECS, etc) and its purpose." --budget 8000
-```
-
-Parse the output to build a list of `{name, type, purpose}` entries.
-
-**Filter:** Remove any resource whose type matches an entry in `references/ignore-resources.txt`
-(case-insensitive match against the type name. e.g. "kms" removes all KMS resources,
-"sqs dlq" removes dead-letter queues but NOT primary SQS queues).
-
-**Stop condition:** If zero supported AWS resources remain after filtering, stop and tell the user.
-
-### Phase B — Connection Discovery
-
-For each remaining resource, trace its connections:
-
-```
-graphify query "what does <resource_name> call or send data to? What calls or sends data to <resource_name>? List all upstream and downstream connections." --dfs --budget 4000
+```json
+{
+  "title": "<project>",
+  "nodes": [{"id": "...", "address": "aws_lambda_function.order_ingest",
+             "source_file": "deploy/regional/order-ingest-lambda.tf"}, ...],
+  "edges": [{"source": "<id>", "target": "<id>", "relation": "wiring"}, ...]
+}
 ```
 
-Run this per unique resource. Merge all results to build a directed graph of connections.
+Generate a draft model directly (no LLM queries needed for the inventory):
 
-### Phase C — External Systems
-
-Find non-AWS external systems:
-
-```
-graphify query "what external systems, third-party services, user interfaces, or non-AWS endpoints does this project interact with?" --budget 4000
+```bash
+python3 <SKILL_DIR>/scripts/render.py --discover graphify-out/resources.json
 ```
 
-External systems become the left/right boundary boxes in the diagram.
+The draft contains typed nodes + AWS-to-AWS edges, with KMS/IAM/DLQ/test
+scaffolding already filtered. You still need to add (via judgment or a few
+queries):
+
+- **DDB stream triggers** (DynamoDB → Lambda) — often absent from resources.json
+- **Lambda → DynamoDB writes**
+- **Externals** (upstream / downstream systems) and their edges
+
+## Fallback — batched graphify queries
+
+If `resources.json` is missing or stale, use 3 batched queries (not per-resource):
+
+```
+graphify query "list all AWS resources in this project and their types (lambda, sqs, sns, dynamodb, eventbridge, etc)." --budget 8000
+graphify query "trace the data flow: which SQS queues feed which lambdas, which lambdas write which DynamoDB tables, which DDB streams trigger which lambdas, which lambdas publish to which SNS topics." --budget 8000
+graphify query "what external systems (WMS, upstream publishers, downstream consumers) does this project interact with?" --budget 4000
+```
+
+If a query truncates, raise `--budget` or split it — never ask the user to
+re-run graphify.
 
 ## Building the Architecture Model
 
-From merged query results, build:
+From merged results, build the model JSON (see SKILL.md Step 3):
 
-1. **Nodes:** each unique AWS resource (name + type)
-2. **Edges:** each connection between resources (source → target, with direction)
-3. **External sources:** systems that feed data IN (go on left)
-4. **External sinks:** systems that receive data OUT (go on right)
+1. **Nodes:** each supported AWS resource `{id, name, type}`
+2. **Edges:** each data-flow connection `{from, to}` (SQS→Lambda, Lambda→DDB,
+   DDB stream→Lambda, Lambda→SNS, EventBridge→Lambda, External↔AWS)
+3. **Externals:** systems outside the AWS account; upstream on the left,
+   downstream on the right
+4. Filter against `references/ignore-resources.txt`
 
-## Layout Assignment
-
-Using the connection graph:
-
-1. **Left → Right flow:** Sources at the left, compute in middle, databases/storage at right
-2. **Row assignment:** Each independent flow chain gets its own row
-3. **External placement:** Upstream externals at `x=-80`, downstream at `x=1920`
-4. **Shared resources:** A DynamoDB table or SQS queue used by multiple flows appears ONCE,
-   positioned between the rows that use it, with distributed entry points
+Layout (columns, rows, waypoints, colors, external-box geometry) is computed by
+`scripts/render.py`. Do not attempt to lay out the diagram yourself.

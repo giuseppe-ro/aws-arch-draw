@@ -198,6 +198,35 @@ def layout(model):
             outgoing[e["from"]].append(e["to"])
             incoming[e["to"]].append(e["from"])
 
+    # ---- cycle detection: a cycle would make longest-path depth grow
+    # forever; find and report it instead of looping infinitely. ----
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in aws_ids}
+    cycle = []
+
+    def visit(n, path):
+        color[n] = GRAY
+        path.append(n)
+        for m in outgoing[n]:
+            if color[m] == GRAY:
+                start = path.index(m)
+                cycle.extend(path[start:] + [m])
+                return True
+            if color[m] == WHITE and visit(m, path):
+                return True
+        path.pop()
+        color[n] = BLACK
+        return False
+
+    for n in aws_ids:
+        if color[n] == WHITE and visit(n, []):
+            break
+    if cycle:
+        fail("cycle detected in AWS edges: " + " -> ".join(cycle) +
+             "\nA cycle (e.g. a hallucinated DDB stream edge like "
+             "'ddb-x -> lambda-y' that should be 'lambda-y -> ddb-x') makes the "
+             "layout unsolvable. Fix the model edges before re-rendering.")
+
     # ---- columns: longest path depth from sources ----
     depth = {n: 1 for n in aws_ids}
     changed = True
@@ -806,8 +835,67 @@ def infer_type(address):
     return None
 
 
+def read_trigger_edges(graph_path):
+    """Extract authoritative DDB-stream and SQS trigger edges from
+    graphify-out/graph.json.
+
+    Each `aws_lambda_event_source_mapping.<name>` node has `references`
+    edges to its source (a DynamoDB table for stream triggers, or an SQS
+    queue) and to the Lambda it invokes. This is the authoritative source
+    for DDB→Lambda stream edges — resources.json omits it.
+
+    Returns (edges, stream_triggers) where edges is a list of
+    (from_addr, to_addr, kind) tuples (kind in {'stream','sqs'}) and
+    stream_triggers is a list of "ddb-table -> lambda" strings."""
+    edges = []
+    stream_triggers = []
+    try:
+        with open(graph_path) as f:
+            g = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return edges, stream_triggers
+
+    nodelabel = {n["id"]: n.get("label", n.get("id", "")) for n in g.get("nodes", [])}
+    links = g.get("links", [])
+    by_source = {}
+    for l in links:
+        by_source.setdefault(l.get("source"), []).append(l)
+
+    for n in g.get("nodes", []):
+        lbl = n.get("label", "")
+        if not lbl.startswith("aws_lambda_event_source_mapping."):
+            continue
+        refs = [nodelabel.get(l.get("target")) for l in by_source.get(n["id"], [])
+                if l.get("relation") == "references"]
+        refs = [r for r in refs if r]
+        table = next((r for r in refs if r.startswith("aws_dynamodb_table.")), None)
+        queue = next((r for r in refs if r.startswith("aws_sqs_queue.")), None)
+        lamb = next((r for r in refs if r.startswith("aws_lambda_function.")), None)
+        if not lamb:
+            continue
+        # map terraform addresses to the short ids used by the model
+        def short(addr):
+            return addr.replace(".", "-").replace("_", "-")
+        if table:
+            edges.append((short(table), short(lamb), "stream"))
+            stream_triggers.append(f"{table} -> {lamb}")
+        elif queue:
+            edges.append((short(queue), short(lamb), "sqs"))
+    # dedupe
+    seen = set()
+    dedup = []
+    for frm, tgt, kind in edges:
+        if (frm, tgt) in seen:
+            continue
+        seen.add((frm, tgt))
+        dedup.append((frm, tgt, kind))
+    return dedup, stream_triggers
+
+
 def discover(resources_path, ignore_path=None):
-    """Build a draft model from graphify-out/resources.json + ignore list."""
+    """Build a draft model from graphify-out/resources.json + ignore list,
+    enriched with authoritative DDB-stream / SQS trigger edges from
+    graph.json (so stream edges never have to be guessed)."""
     with open(resources_path) as f:
         data = json.load(f)
 
@@ -861,15 +949,27 @@ def discover(resources_path, ignore_path=None):
         seen.add((src, tgt))
         edges.append({"from": src, "to": tgt})
 
+    # enrich with authoritative trigger edges from graph.json (same dir)
+    graph_path = os.path.join(os.path.dirname(os.path.abspath(resources_path)),
+                              "graph.json")
+    trig_edges, stream_triggers = read_trigger_edges(graph_path)
+    for frm, tgt, kind in trig_edges:
+        if frm in node_type and tgt in node_type and (frm, tgt) not in seen:
+            seen.add((frm, tgt))
+            edges.append({"from": frm, "to": tgt})
+
     draft = {
         "title": str(data.get("title") or "Architecture"),
         "nodes": nodes,
         "edges": edges,
         "externals": [],
         "_draft": True,
-        "_note": "Draft from resources.json. Add externals + missing edges "
-                 "(DDB stream triggers, Lambda->DDB writes, external boundaries) "
-                 "from graphify queries, then remove this note.",
+        "_note": "Draft from resources.json + graph.json event source mappings. "
+                 "Add externals + external boundaries + any Lambda->DDB write "
+                 "edges missing from resources.json. DDB stream triggers are "
+                 "already included from graph.json — do NOT guess or add new "
+                 "DDB->Lambda edges. Remove this note.",
+        "_stream_triggers": stream_triggers,
     }
     return draft
 
@@ -893,15 +993,19 @@ def model_warnings(model):
         t = n["type"]
         if t == "dynamodb":
             if not incoming[nid]:
-                warns.append(f"DynamoDB '{nid}' has no incoming edges — "
-                             "it should be written by at least one Lambda (check "
-                             "Lambda→DDB edges are present)")
+                warns.append(f"DynamoDB '{nid}' has no incoming edges — it should "
+                             "be written by at least one Lambda. VERIFY the real "
+                             "Lambda→DDB write edges via a graphify query before "
+                             "adding them; do not guess.")
             elif not outgoing[nid]:
                 # written but nothing reads/streams it — a pure sink is fine,
                 # but a missing DDB stream → Lambda edge is the common error
                 warns.append(f"DynamoDB '{nid}' is written but has no outgoing "
-                             "edges — OK if a pure sink; otherwise add the DDB "
-                             "stream → Lambda edge")
+                             "edges. VERIFY whether it has a DDB stream trigger "
+                             "by checking aws_lambda_event_source_mapping in "
+                             "graphify BEFORE adding a DDB→Lambda edge — do not "
+                             "infer one. If it is a pure sink (no stream), this "
+                             "warning can be ignored.")
         elif not incoming[nid] and not outgoing[nid]:
             warns.append(f"node '{nid}' ({t}) has zero edges (orphan)")
     return warns
@@ -917,7 +1021,13 @@ def main():
         base = os.path.dirname(os.path.abspath(__file__))
         ignore_path = os.path.join(base, "..", "references", "ignore-resources.txt")
         draft = discover(resources_path, ignore_path)
+        stream_triggers = draft.pop("_stream_triggers", [])
+        draft.pop("_draft", None)
         print(json.dumps(draft, indent=2))
+        if stream_triggers:
+            print("\n# Confirmed DDB stream triggers (from graph.json):")
+            for s in stream_triggers:
+                print(f"#   {s}")
         return
 
     path = sys.argv[1]

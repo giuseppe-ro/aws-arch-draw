@@ -87,8 +87,14 @@ queries instead of per-resource queries:
 ```
 graphify query "list all AWS resources in this project and their types (lambda, sqs, sns, dynamodb, eventbridge, etc)." --budget 8000
 graphify query "trace the data flow: which SQS queues feed which lambdas, which lambdas write which DynamoDB tables, which DDB streams trigger which lambdas, which lambdas publish to which SNS topics." --budget 8000
+graphify query "list all DynamoDB stream triggers and their Lambda targets (aws_lambda_event_source_mapping referencing aws_dynamodb_table and aws_lambda_function)." --budget 4000
 graphify query "what external systems (WMS, upstream publishers, downstream consumers) does this project interact with?" --budget 4000
 ```
+
+`--discover` already reads `graphify-out/graph.json` and includes the
+authoritative **DDB stream trigger edges** (and SQS→Lambda trigger edges) in
+the draft — it prints them as `# Confirmed DDB stream triggers`. Treat those
+as ground truth.
 
 ### Step 3 — Refine into a model JSON
 
@@ -126,11 +132,25 @@ Rules for building the model (this is the ONLY judgment the model does):
    CloudWatch alarms, SSM params, test scaffolding).
 3. **Edges** = data-flow connections only: SQS→Lambda, Lambda→DDB, DDB stream→
    Lambda, Lambda→SNS, EventBridge→Lambda, External→SQS, SNS→External. Include
-   DDB stream triggers and Lambda→DDB writes even if `resources.json` omits them.
-4. **Externals** = systems outside the AWS account (upstream WMS / publishers on
+   Lambda→DDB writes even if `resources.json` omits them. DDB stream→Lambda
+   edges MUST come from the confirmed triggers in the `--discover` output (or
+   from the stream-trigger query) — never guess or invent a DDB→Lambda edge.
+4. **DDB stream edge rule (CRITICAL):**
+   - A DDB→Lambda edge exists ONLY where an `aws_lambda_event_source_mapping`
+     references that DDB table as its source. Use the confirmed triggers.
+   - The triggered Lambda reads the stream; it does NOT write that table.
+   - Lambda→DDB **write** edges are the ones where the Lambda's IAM policy
+     grants write on the table — these are safe to include.
+   - If you are unsure whether an edge exists, run a targeted graphify query
+     (`graphify explain "aws_lambda_event_source_mapping.<name>"`) BEFORE
+     adding it. Never add an edge to silence a render.py warning.
+5. **Externals** = systems outside the AWS account (upstream WMS / publishers on
    the left, downstream consumers on the right). An SNS topic that fans out to
    SQS queues is an AWS node, NOT an external.
-5. Save the model to `graphify-out/architecture-model.json`.
+6. **Never carry edges forward from an old `architecture-model.json` or backup
+   without re-validating each one against graphify.** Start from the fresh
+   `--discover` draft each time.
+7. Save the model to `graphify-out/architecture-model.json`.
 
 Do NOT worry about: columns, rows, x/y, waypoints, entry/exit fractions, colors,
 fan-out promotion, external box heights, z-order, or XML escaping. render.py
@@ -148,10 +168,16 @@ checklist (grid alignment, left-to-right flow, anchors, waypoint math, external
 box geometry, edge-icon collisions, XML well-formedness). It exits non-zero with
 a list of failures if anything is wrong — fix the MODEL, not the XML, and re-run.
 
+render.py detects **cycles** in the AWS edges and fails with the cycle listed
+instead of looping forever. A cycle almost always means a hallucinated/reversed
+DDB stream edge (e.g. `ddb-x -> lambda-y` that should be `lambda-y -> ddb-x`) —
+correct the model edges and re-run.
+
 render.py also prints **model warnings** (e.g. a DynamoDB table with no writers,
-an orphan node). Treat these as likely model errors: review the model and add
-missing edges before reporting the diagram as done. Ignore a warning only if the
-resource is genuinely a sink with no stream consumer.
+an orphan node). Treat these as review points, NOT as instructions: verify a
+suspected missing edge against graphify before adding it. Never add an edge to
+silence a warning. Ignore a warning only if the resource is genuinely a sink
+with no stream consumer.
 
 If you need to debug a layout without writing a file: append `--check`.
 

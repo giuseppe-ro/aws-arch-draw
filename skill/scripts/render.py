@@ -35,6 +35,8 @@ ICON_SIZE = 80
 COL_STEP = 240
 ROW_STEP = 160
 GRID = 10
+WP_MARGIN = 40
+WP_FANOUT_STEP = 20
 
 TYPES = {
     "sqs":           {"icon": "mxgraph.aws4.sqs", "color": "#E7157B", "label": "SQS"},
@@ -393,6 +395,43 @@ def layout(model):
         x["x"] = -80 if x["side"] == "left" else max(n["x"] for n in nodes.values()) + 160
 
     # ---- per-edge exitY/entryY + waypoints ----
+    # Compute exitY/entryY fractions first (needed for routing-column overlap).
+    edge_exit_pix = {}
+    edge_entry_pix = {}
+    for i, e in enumerate(edges):
+        src_is_aws = e["from"] in aws_ids
+        tgt_is_aws = e["to"] in aws_ids
+        if not (src_is_aws and tgt_is_aws):
+            continue
+        src, tgt = nodes[e["from"]], nodes[e["to"]]
+        fracs = edge_fracs.get(i, {})
+        if src["y"] == tgt["y"]:
+            continue
+        exit_y = fracs.get("exitY", 0.5)
+        entry_y = fracs.get("entryY", 0.5)
+        edge_exit_pix[i] = src["y"] + exit_y * ICON_SIZE
+        edge_entry_pix[i] = tgt["y"] + entry_y * ICON_SIZE
+
+    # Assign each cross-row edge a routing column. Edges whose vertical
+    # segments overlap (same X, overlapping Y range) must get distinct
+    # columns; edges whose verticals don't overlap may share a column.
+    routing_col = {}
+    col_verticals = {}
+    for i, e in enumerate(edges):
+        if i not in edge_exit_pix:
+            continue
+        src = nodes[e["from"]]
+        base = src["x"] + ICON_SIZE + WP_MARGIN
+        y0, y1 = edge_exit_pix[i], edge_entry_pix[i]
+        lo, hi = min(y0, y1), max(y0, y1)
+        taken = col_verticals.get(src["x"], [])
+        rx = base
+        while any(lo < hi2 and hi > lo2 for (x, lo2, hi2) in taken if x == rx):
+            rx += WP_FANOUT_STEP
+        taken.append((rx, lo, hi))
+        col_verticals[src["x"]] = taken
+        routing_col[i] = rx
+
     for i, e in enumerate(edges):
         src_is_aws = e["from"] in aws_ids
         tgt_is_aws = e["to"] in aws_ids
@@ -407,9 +446,11 @@ def layout(model):
             else:
                 e["exitY"] = fracs.get("exitY", 0.5)
                 e["entryY"] = fracs.get("entryY", 0.5)
-                e["waypoints"] = [(src["x"] + ICON_SIZE + 10,
-                                   src["y"] + e["exitY"] * ICON_SIZE),
-                                  (tgt["x"] - 10, tgt["y"] + e["entryY"] * ICON_SIZE)]
+                rx = routing_col.get(i, src["x"] + ICON_SIZE + WP_MARGIN)
+                # never push the vertical line past the target approach
+                rx = min(rx, tgt["x"] - WP_MARGIN - 10)
+                e["waypoints"] = [(rx, src["y"] + e["exitY"] * ICON_SIZE),
+                                  (tgt["x"] - WP_MARGIN, tgt["y"] + e["entryY"] * ICON_SIZE)]
         elif not src_is_aws and tgt_is_aws:
             # left external -> AWS: horizontal at target center
             e["entryY"] = 0.5
@@ -665,6 +706,16 @@ def validate_drawio(xml_text):
             pts = [(float(p.get("x")), float(p.get("y"))) for p in geom.find("Array")]
             if len(pts) != 2:
                 errors.append(f"edge '{eid}' has {len(pts)} waypoints (expected 2)")
+            else:
+                # L-shaped cross-row edge: enforce >= WP_MARGIN horizontal runs
+                init_run = pts[0][0] - (sx + sw)
+                fin_run = tx - pts[1][0]
+                if init_run < WP_MARGIN:
+                    errors.append(f"edge '{eid}' initial horizontal run is only "
+                                  f"{init_run:.0f}px (min {WP_MARGIN}px)")
+                if fin_run < WP_MARGIN:
+                    errors.append(f"edge '{eid}' final horizontal run is only "
+                                  f"{fin_run:.0f}px (min {WP_MARGIN}px)")
 
     # edge-icon collision check
     for el in edges:

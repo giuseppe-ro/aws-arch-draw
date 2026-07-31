@@ -324,32 +324,37 @@ def layout(model):
         nodes[s]["y"] = snapped
 
     # ---- entry/exit fraction distribution ----
-    frac_table = {1: [0.5], 2: [0.25, 0.75], 3: [0.25, 0.5, 0.75]}
+    def fractions(n):
+        """n equally spaced, symmetric, non-overlapping fractions in (0,1).
+        f_i = (2i+1)/(2n): equal 1/n spacing, pairs sum to 1.0."""
+        return [(2 * i + 1) / (2 * n) for i in range(n)]
 
     def distribute(edges_list, self_y):
         """edges_list: list of (real_edge_index, other_y).
-        Returns dict real_edge_index -> fraction."""
+        Returns dict real_edge_index -> fraction. Fractions are equally spaced,
+        symmetric about 0.5, and never overlap."""
         result = {}
         count = len(edges_list)
         if count == 0:
             return result
-        if count > 3:
-            fail("max 3 arrows per icon edge — split the fan-out")
         same = [(i, oy) for (i, oy) in edges_list if oy == self_y]
         cross = [(i, oy) for (i, oy) in edges_list if oy != self_y]
         if same:
+            # the same-row edge stays a straight horizontal line at center 0.5;
+            # the cross edges are equally spaced symmetric about 0.5, avoiding 0.5.
             result[same[0][0]] = 0.5
-            pool = [f for f in frac_table[count] if f != 0.5]
-            below = sorted([(i, oy) for (i, oy) in cross if oy > self_y], key=lambda t: t[1])
-            above = sorted([(i, oy) for (i, oy) in cross if oy < self_y], key=lambda t: -t[1])
-            # above edges take low fractions, below edges take high fractions
-            for (i, _) in above:
-                result[i] = pool.pop(0)
-            for (i, _) in below:
-                result[i] = pool.pop(-1)
+            above = sorted([(i, oy) for (i, oy) in cross if oy < self_y],
+                           key=lambda t: abs(t[1] - self_y))
+            below = sorted([(i, oy) for (i, oy) in cross if oy > self_y],
+                           key=lambda t: abs(t[1] - self_y))
+            d = 0.5 / (max(len(above), len(below)) + 1)
+            for k, (i, _) in enumerate(above):
+                result[i] = 0.5 - (k + 1) * d
+            for k, (i, _) in enumerate(below):
+                result[i] = 0.5 + (k + 1) * d
         else:
             ordered = sorted(edges_list, key=lambda t: t[1])
-            for (i, _), f in zip(ordered, frac_table[count]):
+            for (i, _), f in zip(ordered, fractions(count)):
                 result[i] = f
         return result
 

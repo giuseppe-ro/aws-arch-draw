@@ -64,13 +64,13 @@ TYPES = {
 }
 
 BASE_ICON_STYLE = ("sketch=0;outlineConnect=0;fontColor=#232F3E;strokeColor=#ffffff;dashed=0;"
-                   "verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;"
+                   "shadow=1;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;"
                    "fontStyle=0;aspect=fixed;shape=mxgraph.aws4.resourceIcon;resIcon={icon};fillColor={color};")
 DDB_STYLE = ("sketch=0;outlineConnect=0;fontColor=#232F3E;strokeColor=#ffffff;dashed=0;"
-             "verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;"
+             "shadow=1;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;"
              "aspect=fixed;shape=mxgraph.aws4.dynamodb_standard_access_table_class;fillColor=#C925D1;"
              "gradientColor=none;pointerEvents=1;")
-EXTERNAL_STYLE = "rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontColor=#232F3E;"
+EXTERNAL_STYLE = "rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontColor=#232F3E;shadow=1;"
 EDGE_BASE = ("edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;"
              "strokeWidth=2;jumpStyle=arc;endArrow=classic")
 
@@ -653,7 +653,7 @@ def generate_xml(model, nodes, ext, edges):
         f'  <diagram name="Page-1" id="ARCHITECTURE">\n'
         f'    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" '
         f'arrows="1" fold="1" page="1" pageScale="1" pageWidth="{int(page_w)}" pageHeight="{int(page_h)}" '
-        f'background="light-dark(#FFFFFF,#FFFFFF)" math="0" shadow="0">\n'
+        f'background="light-dark(#FFFFFF,#FFFFFF)" math="0" shadow="1">\n'
         f"      <root>\n"
         f'        <mxCell id="0" />\n'
         f'        <mxCell id="1" parent="0" />\n'

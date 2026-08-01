@@ -407,6 +407,28 @@ def layout(model):
         nodes[s]["row"] = snapped // ROW_STEP
         nodes[s]["y"] = snapped
 
+    # ---- stream-consumer alignment: sit continuation chains that start at a
+    # shared resource (e.g. a DDB-stream-triggered lambda) on that resource's
+    # row, so a stream consumer sits beside the table that feeds it — the same
+    # rule that keeps tables beside their writers. Collision-guarded: if any
+    # member of the chain already occupies a cell on that row, leave the chain
+    # on its own row.
+    chain_by_head = {}
+    for c in chains:
+        if c:
+            chain_by_head.setdefault(c[0], c)
+    for s in sorted(shared, key=lambda n: (depth[n], n)):
+        sy = nodes[s]["y"]
+        for t in outgoing[s]:
+            c = chain_by_head.get(t)
+            if not c:
+                continue
+            if any(row_taken(nodes[nid]["x"], sy) for nid in c):
+                continue
+            for nid in c:
+                nodes[nid]["row"] = sy // ROW_STEP
+                nodes[nid]["y"] = sy
+
     # ---- sink alignment: place single-producer sinks beside their producer ----
     # Without this, a sink topic (e.g. an updates topic with no consumers) is
     # chain-sorted to the very bottom of the diagram and connected by a long

@@ -387,17 +387,14 @@ def layout(model):
 
     for s in sorted(shared, key=lambda n: depth[n]):
         writers = [nodes[w] for w in incoming[s]]
-        # Place the shared sink below its LOWEST row of writers? No — with
-        # writers spanning many rows that lands it in the middle of the fan-in
-        # band, so a same-row writer's horizontal edge cuts through other icons
-        # on that row. Anchor it below the HIGHEST writer instead: every
-        # writer -> shared edge then routes cross-row (via waypoints) and can't
-        # pass through a sibling table.
-        highest = max(w["y"] for w in writers)
-        candidate = highest + ROW_STEP
-        snapped = round(candidate / ROW_STEP) * ROW_STEP
-        if snapped < candidate:
-            snapped += ROW_STEP
+        # Anchor the shared table at the CENTER of its direct users' rows.
+        # Only resources that USE the table directly (write/put/read/delete —
+        # any incoming edge) should position it. Lambdas that consume the
+        # table's DDB stream are outgoing edges (they merely REACT to events
+        # the table emits) and must not drag the table away from its writers.
+        ws = [w["y"] for w in writers]
+        candidate = (min(ws) + max(ws)) / 2
+        snapped = int(round(candidate / ROW_STEP)) * ROW_STEP
         while row_taken(nodes[s]["x"], snapped):
             snapped += ROW_STEP
         nodes[s]["row"] = snapped // ROW_STEP

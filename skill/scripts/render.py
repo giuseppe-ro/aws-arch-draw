@@ -19,10 +19,17 @@ s3, kinesis, cloudwatch, ecs, eks, aurora, rds, sagemaker, bedrock, cognito,
 cloudfront, route53, vpc, iam, secretsmanager.
 
 Usage:
-  python3 render.py model.json --out diagram.drawio
-  python3 render.py model.json --check          # validate only
-  python3 render.py diagram.drawio --check      # validate an existing file
-  python3 render.py --discover resources.json   # draft model from graphify
+  python3 render.py model.json --out diagram.drawio --tf deploy/
+  python3 render.py model.json --check --tf deploy/       # validate only
+  python3 render.py diagram.drawio --check                # validate an existing file
+  python3 render.py --discover resources.json             # draft model from graphify
+  python3 render.py --discover-tf deploy/                 # draft model from terraform (authoritative)
+
+Ground truth:
+  A render is only allowed when the model can be diffed against ground truth:
+  graphify-out/resources.json (--graph) OR terraform (--tf <deploy-dir>). When
+  neither exists render.py exits with status 3 (UNVERIFIED); the caller should
+  ask the user how to proceed instead of saving an unverified diagram.
 """
 
 import json
@@ -385,7 +392,7 @@ def layout(model):
                 return True
         return False
 
-    for s in sorted(shared, key=lambda n: depth[n]):
+    for s in sorted(shared, key=lambda n: (depth[n], n)):
         writers = [nodes[w] for w in incoming[s]]
         # Anchor the shared table at the CENTER of its direct users' rows.
         # Only resources that USE the table directly (write/put/read/delete —
@@ -399,6 +406,27 @@ def layout(model):
             snapped += ROW_STEP
         nodes[s]["row"] = snapped // ROW_STEP
         nodes[s]["y"] = snapped
+
+    # ---- sink alignment: place single-producer sinks beside their producer ----
+    # Without this, a sink topic (e.g. an updates topic with no consumers) is
+    # chain-sorted to the very bottom of the diagram and connected by a long
+    # vertical edge that crosses the whole canvas. Aligning it to its producer's
+    # row keeps the edge short and the diagram compact.
+    for nid in list(nodes):
+        n = nodes[nid]
+        if outgoing[nid]:
+            continue
+        ins = incoming[nid]
+        if len(ins) != 1:
+            continue
+        prod = nodes[ins[0]]
+        if prod["x"] >= n["x"]:
+            continue
+        cand = prod["y"]
+        if row_taken(n["x"], cand):
+            continue
+        n["row"] = cand // ROW_STEP
+        n["y"] = cand
 
     # ---- entry/exit fraction distribution ----
     def fractions(n):
@@ -474,7 +502,7 @@ def layout(model):
         x["y"] = first - 40
         x["h"] = (last - first) + 160
         x["w"] = 160
-        x["x"] = -80 if x["side"] == "left" else max(n["x"] for n in nodes.values()) + 160
+        x["x"] = 0 if x["side"] == "left" else max(n["x"] for n in nodes.values()) + 160
 
     # ---- per-edge exitY/entryY + waypoints ----
     # Compute exitY/entryY fractions first (needed for routing-column overlap).
@@ -603,7 +631,7 @@ def generate_xml(model, nodes, ext, edges):
     lowest = max(n["y"] for n in nodes.values())
     page_w = rightmost + 320
     page_h = lowest + 320
-    title_w = max(page_w, 2100)
+    title_w = max(page_w, 800)
 
     cells = []
 
@@ -1295,6 +1323,66 @@ def validate_model_against_graph(model, resources_path, ignore_path=None):
     return errors, warns
 
 
+def validate_model_against_tf(model, draft):
+    """Diff the model against the terraform-derived ground-truth draft.
+
+    Hard errors: a fabricated AWS node, an AWS->AWS edge terraform does not
+    support, a missing authoritative edge, a node name/type that does not match
+    the terraform-derived name/type, or an external id that is not referenced by
+    terraform. Boundary edges (external <-> node) that differ are warnings.
+    """
+    errors, warns = [], []
+    auth_node_ids = {n["id"] for n in draft["nodes"]}
+    auth_names = {n["id"]: n["name"] for n in draft["nodes"]}
+    auth_types = {n["id"]: n["type"] for n in draft["nodes"]}
+    ext_ids = {x["id"] for x in draft["externals"]}
+    auth_edges = {(e["from"], e["to"]) for e in draft["edges"]}
+
+    model_ids = {n["id"] for n in model["nodes"]}
+    model_ext_ids = {x["id"] for x in model["externals"]}
+
+    for nid in sorted(model_ids - auth_node_ids - ext_ids):
+        errors.append(f"node '{nid}' is not a terraform resource (fabricated). "
+                      f"Only use ids from `--discover-tf`.")
+    for n in model["nodes"]:
+        if n["id"] in auth_names:
+            if n["name"] != auth_names[n["id"]]:
+                errors.append(f"node '{n['id']}': name '{n['name']}' does not match "
+                              f"the terraform-derived name '{auth_names[n['id']]}'.")
+            if n["type"] != auth_types[n["id"]]:
+                errors.append(f"node '{n['id']}': type '{n['type']}' should be "
+                              f"'{auth_types[n['id']]}'.")
+    for x in model["externals"]:
+        if x["id"] not in ext_ids:
+            errors.append(f"external '{x['id']}' is not referenced by terraform "
+                          f"(`--discover-tf` ground truth).")
+    for eid in sorted(ext_ids - model_ext_ids):
+        warns.append(f"external '{eid}' exists in terraform ground truth but is "
+                     f"not in the model — add it, or merge it into a box only if "
+                     f"it represents the same external system.")
+
+    model_aws = {(e["from"], e["to"]) for e in model["edges"]
+                 if e["from"] in model_ids and e["to"] in model_ids}
+    model_ext_edges = {(e["from"], e["to"]) for e in model["edges"]
+                       if e["from"] in ext_ids or e["to"] in ext_ids}
+
+    for frm, to in sorted(model_aws - auth_edges):
+        errors.append(f"edge '{frm} -> {to}' has no terraform support. "
+                      f"Check the real data flow — `--discover-tf` is ground truth.")
+    for frm, to in sorted(auth_edges):
+        if frm in model_ids and to in model_ids and (frm, to) not in model_aws:
+            errors.append(f"missing authoritative edge '{frm} -> {to}' — terraform "
+                          f"shows this connection between two nodes you included.")
+    for frm, to in sorted(model_ext_edges - auth_edges):
+        warns.append(f"external boundary edge '{frm} -> {to}' is not in terraform "
+                     f"ground truth — verify it.")
+    for frm, to in sorted(auth_edges):
+        if frm in ext_ids and (frm, to) not in model_ext_edges:
+            warns.append(f"missing boundary edge '{frm} -> {to}' — terraform feeds "
+                         f"'{to}' from external '{frm}'.")
+    return errors, warns
+
+
 def find_resources(near=None):
     """Locate graphify-out/resources.json for ground-truth validation.
 
@@ -1341,6 +1429,22 @@ def main():
                 print(f"#   {s}")
         return
 
+    if sys.argv[1] == "--discover-tf":
+        from tf_parser import discover as tf_discover
+        deploy_dir = sys.argv[2] if len(sys.argv) > 2 else "deploy"
+        draft, notes = tf_discover(deploy_dir)
+        draft["title"] = "Architecture"
+        print(json.dumps(draft, indent=2))
+        if notes["evidence"]:
+            print("\n# TF ground-truth evidence (kind @ file:line):")
+            for k, v in notes["evidence"].items():
+                print(f"#   {k}  [{v}]")
+        if notes["pruned"]:
+            print("\n# Pruned (DLQ/test/alert/IAM plumbing):")
+            for p in notes["pruned"]:
+                print(f"#   {p}")
+        return
+
     path = sys.argv[1]
     flags = sys.argv[2:]
     check_only = "--check" in flags
@@ -1372,6 +1476,9 @@ def main():
         resources_path = flags[flags.index("--graph") + 1]
     else:
         resources_path = find_resources(path)
+    tf_path = None
+    if "--tf" in flags:
+        tf_path = flags[flags.index("--tf") + 1]
     gv_errors, gv_warns = [], []
     if resources_path:
         gv_errors, gv_warns = validate_model_against_graph(
@@ -1381,9 +1488,19 @@ def main():
             for e in gv_errors:
                 print(f"  [FAIL] {e}")
             sys.exit(1)
+    elif tf_path:
+        from tf_parser import discover as tf_discover
+        tf_draft, _notes = tf_discover(tf_path)
+        gv_errors, gv_warns = validate_model_against_tf(model, tf_draft)
+        if gv_errors:
+            print("Model does not match terraform ground truth:")
+            for e in gv_errors:
+                print(f"  [FAIL] {e}")
+            sys.exit(1)
     else:
-        print("  (no graphify-out/resources.json found — skipping "
-              "ground-truth validation)")
+        print("UNVERIFIED: no ground truth available (no graphify-out/resources.json "
+              "and no --tf <deploy-dir>). Refusing to render an unverified diagram.", file=sys.stderr)
+        sys.exit(3)
 
     warns = model_warnings(model)
     nodes, ext, edges = layout(model)

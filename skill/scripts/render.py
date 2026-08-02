@@ -407,27 +407,27 @@ def layout(model):
         nodes[s]["row"] = snapped // ROW_STEP
         nodes[s]["y"] = snapped
 
-    # ---- stream-consumer alignment: sit continuation chains that start at a
-    # shared resource (e.g. a DDB-stream-triggered lambda) on that resource's
-    # row, so a stream consumer sits beside the table that feeds it — the same
-    # rule that keeps tables beside their writers. Collision-guarded: if any
-    # member of the chain already occupies a cell on that row, leave the chain
-    # on its own row.
-    chain_by_head = {}
-    for c in chains:
-        if c:
-            chain_by_head.setdefault(c[0], c)
-    for s in sorted(shared, key=lambda n: (depth[n], n)):
-        sy = nodes[s]["y"]
-        for t in outgoing[s]:
-            c = chain_by_head.get(t)
-            if not c:
-                continue
-            if any(row_taken(nodes[nid]["x"], sy) for nid in c):
-                continue
-            for nid in c:
-                nodes[nid]["row"] = sy // ROW_STEP
-                nodes[nid]["y"] = sy
+    # ---- stream alignment: DDB-stream chains sit on their table's row ----
+    # A Lambda that reacts to a table's DDB stream (an outgoing edge from a
+    # DynamoDB node) is the table's direct companion. Put the whole chain that
+    # hangs off it on the table's row so stream-driven flows read horizontally,
+    # mirroring how the shared tables are anchored to their writers above. The
+    # pass runs BEFORE sink alignment so downstream sinks follow the moved
+    # chain to the same row.
+    ddb_rows = {n["id"]: n["y"] for n in nodes.values() if n["type"] == "dynamodb"}
+    chain_by_head = {c[0]: c for c in chains}
+    for e in edges:
+        if e["from"] not in ddb_rows or e["to"] not in nodes:
+            continue
+        if nodes[e["to"]]["type"] != "lambda":
+            continue
+        chain = chain_by_head.get(e["to"]) or [e["to"]]
+        cand = ddb_rows[e["from"]]
+        if any(row_taken(nodes[m]["x"], cand) for m in chain):
+            continue
+        for m in chain:
+            nodes[m]["row"] = cand // ROW_STEP
+            nodes[m]["y"] = cand
 
     # ---- sink alignment: place single-producer sinks beside their producer ----
     # Without this, a sink topic (e.g. an updates topic with no consumers) is
@@ -544,57 +544,149 @@ def layout(model):
         edge_exit_pix[i] = src["y"] + exit_y * ICON_SIZE
         edge_entry_pix[i] = tgt["y"] + entry_y * ICON_SIZE
 
-    # Assign each cross-row edge a routing column. Edges whose vertical
-    # segments overlap (same X, overlapping Y range) must get distinct
-    # columns; edges whose verticals don't overlap may share a column.
-    routing_col = {}
-    col_verticals = {}
-    for i, e in enumerate(edges):
-        if i not in edge_exit_pix:
-            continue
-        src = nodes[e["from"]]
-        base = src["x"] + ICON_SIZE + WP_MARGIN
-        y0, y1 = edge_exit_pix[i], edge_entry_pix[i]
-        lo, hi = min(y0, y1), max(y0, y1)
-        taken = col_verticals.get(src["x"], [])
-        rx = base
-        while any(lo < hi2 and hi > lo2 for (x, lo2, hi2) in taken if x == rx):
-            rx += WP_FANOUT_STEP
-        taken.append((rx, lo, hi))
-        col_verticals[src["x"]] = taken
-        routing_col[i] = rx
+    # ---- cross-row routing: drop columns + L-shapes ----
+    # Each cross-row edge is routed as a single L: horizontal at the source's
+    # exit row to a drop column, vertical drop to the entry row, short stub into
+    # the target. Drop columns are allocated per target (nearest column first,
+    # stepping left by DROP_STEP while a vertical would overlap one already
+    # claimed at that column), so verticals never share pixels. Same-row and
+    # external edges keep their fixed straight geometry.
+    DROP_STEP = 40
+
+    def h_taken(y, x0, x1, used_h):
+        return any(uy == y and x0 < ux1 and x1 > ux0 for (uy, ux0, ux1) in used_h)
+
+    def v_taken(x, y0, y1, used_v):
+        return any(ux == x and y0 < uy1 and y1 > uy0 for (ux, uy0, uy1) in used_v)
+
+    def claim_h(y, x0, x1, used_h):
+        used_h.append((y, min(x0, x1), max(x0, x1)))
+
+    drop_col = {}
+    used_v = []
+    by_target = {}
+    for i in edge_exit_pix:
+        by_target.setdefault(edges[i]["to"], []).append(i)
+    for tid, idxs in by_target.items():
+        tgt = nodes[tid]
+        idxs.sort(key=lambda i: min(edge_exit_pix[i], edge_entry_pix[i]))
+        for i in idxs:
+            lo = min(edge_exit_pix[i], edge_entry_pix[i])
+            hi = max(edge_exit_pix[i], edge_entry_pix[i])
+            vx = tgt["x"] - WP_MARGIN
+            while v_taken(vx, lo, hi, used_v):
+                vx -= DROP_STEP
+            used_v.append((vx, lo, hi))
+            drop_col[i] = vx
+
+    blockers = [(n["x"], n["y"], n["x"] + ICON_SIZE, n["y"] + ICON_SIZE)
+                for n in nodes.values()]
+    blockers += [(x["x"], x["y"], x["x"] + x["w"], x["y"] + x["h"])
+                 for x in ext.values()]
+
+    used_h = []
+
+    def register_fixed(src_is_aws, tgt_is_aws, src, tgt):
+        """Same-row AWS and external edges: fixed straight geometry."""
+        if src_is_aws and tgt_is_aws:
+            e["exitY"], e["entryY"] = 0.5, 0.5
+            e["waypoints"] = []
+            claim_h(src["y"] + ICON_SIZE / 2, src["x"] + ICON_SIZE, tgt["x"], used_h)
+        elif not src_is_aws and tgt_is_aws:
+            # left external -> AWS: horizontal at target center
+            e["entryY"] = 0.5
+            e["exitY"] = (tgt["y"] + ICON_SIZE / 2 - src["y"]) / src["h"]
+            e["waypoints"] = []
+            claim_h(tgt["y"] + ICON_SIZE / 2, src["x"] + src["w"], tgt["x"], used_h)
+        else:
+            # AWS -> right external: horizontal at source center
+            e["exitY"] = 0.5
+            e["entryY"] = (src["y"] + ICON_SIZE / 2 - tgt["y"]) / tgt["h"]
+            e["waypoints"] = []
+            claim_h(src["y"] + ICON_SIZE / 2, src["x"] + ICON_SIZE, tgt["x"], used_h)
 
     for i, e in enumerate(edges):
         src_is_aws = e["from"] in aws_ids
         tgt_is_aws = e["to"] in aws_ids
         src = nodes[e["from"]] if src_is_aws else ext[e["from"]]
         tgt = nodes[e["to"]] if tgt_is_aws else ext[e["to"]]
-        fracs = edge_fracs.get(i, {})
-
-        if src_is_aws and tgt_is_aws:
-            if src["y"] == tgt["y"]:
-                e["exitY"], e["entryY"] = 0.5, 0.5
-                e["waypoints"] = []
-            else:
-                e["exitY"] = fracs.get("exitY", 0.5)
-                e["entryY"] = fracs.get("entryY", 0.5)
-                rx = routing_col.get(i, src["x"] + ICON_SIZE + WP_MARGIN)
-                # never push the vertical line past the target approach
-                rx = min(rx, tgt["x"] - WP_MARGIN - 10)
-                e["waypoints"] = [(rx, src["y"] + e["exitY"] * ICON_SIZE),
-                                  (tgt["x"] - WP_MARGIN, tgt["y"] + e["entryY"] * ICON_SIZE)]
-        elif not src_is_aws and tgt_is_aws:
-            # left external -> AWS: horizontal at target center
-            e["entryY"] = 0.5
-            e["exitY"] = (tgt["y"] + ICON_SIZE / 2 - src["y"]) / src["h"]
-            e["waypoints"] = []
-        else:
-            # AWS -> right external: horizontal at source center
-            e["exitY"] = 0.5
-            e["entryY"] = (src["y"] + ICON_SIZE / 2 - tgt["y"]) / tgt["h"]
-            e["waypoints"] = []
+        if not (src_is_aws and tgt_is_aws and src["y"] != tgt["y"]):
+            register_fixed(src_is_aws, tgt_is_aws, src, tgt)
         e["color"] = arrow_color(src, tgt)
         e["src"], e["tgt"] = src, tgt
+
+    for i, e in enumerate(edges):
+        if i not in edge_exit_pix:
+            continue
+        src, tgt = nodes[e["from"]], nodes[e["to"]]
+        fracs = edge_fracs.get(i, {})
+        e["exitY"] = fracs.get("exitY", 0.5)
+        e["entryY"] = fracs.get("entryY", 0.5)
+        exit_pix = src["y"] + e["exitY"] * ICON_SIZE
+        entry_pix = tgt["y"] + e["entryY"] * ICON_SIZE
+        src_right = src["x"] + ICON_SIZE
+        vx = drop_col[i]
+
+        # Preferred route: single L (2 bends). The drop column's vertical is
+        # already allocated overlap-free; verify node clearance and that the two
+        # horizontals are free lanes.
+        lsegs = ((src_right, exit_pix, vx, exit_pix),
+                 (vx, exit_pix, vx, entry_pix),
+                 (vx, entry_pix, tgt["x"], entry_pix))
+        ok = not any(segments_cross_bbox([s], bb) for s in lsegs for bb in blockers)
+        if ok and (h_taken(exit_pix, src_right, vx, used_h) or
+                   h_taken(entry_pix, vx, tgt["x"], used_h)):
+            ok = False
+        if ok:
+            e["waypoints"] = [(vx, exit_pix), (vx, entry_pix)]
+            claim_h(exit_pix, src_right, vx, used_h)
+            claim_h(entry_pix, vx, tgt["x"], used_h)
+            continue
+
+        # Fallback: Z-path bridging on a free gutter lane, all segments
+        # node-free and unclaimed.
+        lo, hi = min(exit_pix, entry_pix), max(exit_pix, entry_pix)
+        mid = (exit_pix + entry_pix) / 2
+        lanes = sorted((k * ROW_STEP + 120
+                        for k in range(int(lo // ROW_STEP), int(hi // ROW_STEP))),
+                       key=lambda y: abs(y - mid))
+        for bridge in lanes:
+            if h_taken(bridge, src_right, tgt["x"], used_h):
+                continue
+            if any(y0 < bridge < y1 and x0 < tgt["x"] and x1 > src_right
+                   for (x0, y0, x1, y1) in blockers):
+                continue
+            v1 = src_right + WP_MARGIN
+            while v_taken(v1, min(exit_pix, bridge), max(exit_pix, bridge), used_v):
+                v1 += WP_FANOUT_STEP
+            v2 = tgt["x"] - WP_MARGIN
+            while v_taken(v2, min(bridge, entry_pix), max(bridge, entry_pix), used_v):
+                v2 -= WP_FANOUT_STEP
+            zsegs = ((src_right, exit_pix, v1, exit_pix),
+                     (v1, exit_pix, v1, bridge),
+                     (v1, bridge, v2, bridge),
+                     (v2, bridge, v2, entry_pix),
+                     (v2, entry_pix, tgt["x"], entry_pix))
+            if any(segments_cross_bbox([s], bb) for s in zsegs for bb in blockers):
+                continue
+            if any(h_taken(s[1], min(s[0], s[2]), max(s[0], s[2]), used_h)
+                   for s in zsegs if s[0] != s[2]):
+                continue
+            if any(v_taken(s[0], min(s[1], s[3]), max(s[1], s[3]), used_v)
+                   for s in zsegs if s[0] == s[2]):
+                continue
+            e["waypoints"] = [(v1, exit_pix), (v1, bridge),
+                              (v2, bridge), (v2, entry_pix)]
+            for s in zsegs:
+                if s[0] == s[2]:
+                    used_v.append((s[0], min(s[1], s[3]), max(s[1], s[3])))
+                else:
+                    used_h.append((s[1], min(s[0], s[2]), max(s[0], s[2])))
+            break
+        else:
+            # No clean route exists (pathological layout): emit the L and let
+            # the validator fail loudly on any icon crossing.
+            e["waypoints"] = [(vx, exit_pix), (vx, entry_pix)]
 
     return nodes, ext, edges
 
@@ -836,12 +928,22 @@ def validate_drawio(xml_text):
             errors.append(f"edge '{eid}' is cross-row but has no waypoints")
         if has_points:
             pts = [(float(p.get("x")), float(p.get("y"))) for p in geom.find("Array")]
-            if len(pts) != 2:
-                errors.append(f"edge '{eid}' has {len(pts)} waypoints (expected 2)")
-            else:
-                # L-shaped cross-row edge: enforce >= WP_MARGIN horizontal runs
+            if len(pts) not in (2, 4):
+                errors.append(f"edge '{eid}' has {len(pts)} waypoints (expected 2 or 4)")
+            # Consecutive waypoints must share an axis (within the 1px int
+            # truncation of waypoint coords). A diagonal segment is invisible to
+            # the collision check below and lets draw.io pick its own
+            # L-orientation — that mismatch is exactly how edges came to slice
+            # through icons (e.g. the snapshot DynamoDB table).
+            for (ax, ay), (bx, by) in zip([(sx + sw, sy + exit_y * sh)] + pts,
+                                          pts + [(tx, ty + entry_y * th)]):
+                if abs(ax - bx) >= 1 and abs(ay - by) >= 1:
+                    errors.append(f"edge '{eid}' has a diagonal segment between "
+                                  f"({ax:.0f},{ay:.0f}) and ({bx:.0f},{by:.0f})")
+            if len(pts) in (2, 4):
+                # L (2) or Z (4) cross-row edge: enforce >= WP_MARGIN runs
                 init_run = pts[0][0] - (sx + sw)
-                fin_run = tx - pts[1][0]
+                fin_run = tx - (pts[3][0] if len(pts) == 4 else pts[1][0])
                 if init_run < WP_MARGIN:
                     errors.append(f"edge '{eid}' initial horizontal run is only "
                                   f"{init_run:.0f}px (min {WP_MARGIN}px)")

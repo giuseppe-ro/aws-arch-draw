@@ -67,6 +67,61 @@ variable "consignment_sent_queue_arn" { type = string }
 variable "consignment_updates_topic_arn" { type = string }
 variable "consignment_cancel_queue_arn" { type = string }
 ''',
+    "regional.tf": '''
+module "eu-west-1" {
+  source = "./regional"
+  region = "eu-west-1"
+}
+''',
+    # BOM-prefixed file: the first resource block must still be discovered
+    "regional/resources.tf": "\ufeff" + '''resource "aws_sqs_queue" "order_ingest" {
+  name = "order-ingest"
+}
+resource "aws_lambda_function" "order_ingest" {
+  function_name = "order-ingest"
+  environment {
+    variables = {
+      ORDER_UPDATED_SQS_URL = aws_sqs_queue.order_updated.url
+    }
+  }
+}
+resource "aws_sqs_queue" "order_updated" {
+  name = "order-updated"
+}
+resource "aws_dynamodb_table" "orders" {
+  name = "orders"
+}
+resource "aws_lambda_event_source_mapping" "order_ingest" {
+  event_source_arn = aws_dynamodb_table.orders.stream_arn
+  function_name    = aws_lambda_function.order_ingest.arn
+}
+data "aws_iam_policy_document" "order_ingest" {
+  statement {
+    actions   = ["dynamodb:GetRecords", "dynamodb:DescribeStream"]
+    resources = [aws_dynamodb_table.orders.arn, aws_dynamodb_table.orders.stream_arn]
+  }
+}
+''',
+    "multi.tf": '''
+module "site_a" {
+  source = "./site"
+}
+module "site_b" {
+  source = "./site"
+}
+''',
+    "site/ingest.tf": '''
+resource "aws_sqs_queue" "ingest" {
+  name = "ingest"
+}
+resource "aws_lambda_function" "ingest" {
+  function_name = "ingest"
+}
+resource "aws_lambda_event_source_mapping" "ingest" {
+  event_source_arn = aws_sqs_queue.ingest.arn
+  function_name    = aws_lambda_function.ingest.arn
+}
+''',
 }
 
 
@@ -119,6 +174,27 @@ def main():
     # nothing fabricated / misnamed
     ok("almelo" not in " ".join(node_ids), "no invented 'almelo' resources")
     ok("tam_cancel" not in node_ids, "no unprovisioned role invented")
+
+    # single-instance module: the module name is NOT part of node ids
+    ok("order_ingest" in node_ids, "single-instance lambda node unprefixed")
+    ok("order_ingest_queue" in node_ids, "BOM-prefixed file first block (SQS queue) discovered")
+    ok("order_updated_queue" in node_ids, "SQS queue publish target node")
+    ok("orders" in node_ids, "DynamoDB table node unprefixed")
+    ok(not any("eu-west-1" in nid for nid in node_ids),
+       "single-instance module name not part of node ids")
+    ok(not any(nid.startswith("_") for nid in node_ids),
+       "empty prefix leaves no leading underscore")
+    # DDB stream trigger present; the stream-source table is not a write target
+    ok(("orders", "order_ingest") in edges,
+       "DDB stream trigger edge orders -> order_ingest")
+    ok(("order_ingest", "orders") not in edges,
+       "stream-triggered lambda does not write its source table")
+    # *_SQS_URL env var is a publish target
+    ok(("order_ingest", "order_updated_queue") in edges,
+       "lambda -> queue publish edge from *_SQS_URL env var")
+    # multi-instance without factory_name falls back to instance-name prefix
+    ok("site_a_ingest_queue" in node_ids and "site_b_ingest_queue" in node_ids,
+       "multi-instance module falls back to instance-name prefix")
 
     failed = [c for c in checks if not c[0]]
     for ok_cond, msg in checks:

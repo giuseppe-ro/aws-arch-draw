@@ -45,8 +45,8 @@ This file only documents the service → icon/color mapping for humans.
 | Property | Value |
 |----------|-------|
 | Icon size | 80 × 80 |
-| External box width | 160 |
-| External box height | span of connected nodes + 120 |
+| External box width | uniform — fits the longest rendered label, min 160 |
+| External box height | uniform — largest node-span requirement, min ~64 |
 
 All placement, spacing, waypoint, and external-box sizing rules are implemented
 in `scripts/render.py` — see that file for the canonical values.
@@ -65,3 +65,24 @@ an on-prem TCP endpoint).
 
 `scripts/render.py` warns when an external `name` contains spaces/hyphens or
 uppercase letters (prose), and when a `description` exceeds 24 characters.
+
+## External box sizing
+
+Every external box is the **same width and height**. render.py measures every
+rendered label line (the snake_case `name`, plus the `SQS`/`SNS` type or a
+custom `description`) at fontSize 12 and sizes all boxes to the **longest line**,
+rounded up to a multiple of 20 (min 160 wide). The uniform height is the largest
+node-span requirement across all externals (rounded to a multiple of 20), so a
+box that spans several rows never clips its connected nodes. Text never drives
+the height — the width grows so labels fit on one line, keeping two lines of
+text well inside the box.
+
+## External box clearance
+
+Every external box keeps a **minimum 80px gap** (`EXT_GAP`) from the nearest
+AWS icon. When the uniform box width grows past the default 160px column
+origin, the **entire AWS grid shifts right by the same amount** (`dx =
+ext_w + 80 − 240`), pushing every column uniformly — even ones that aren't
+affected — so the diagram spacing stays consistent. The AWS icons remain on a
+regular 240px-spaced grid with a shared origin (render.py validates
+`(x − x_origin) % 240 == 0`).

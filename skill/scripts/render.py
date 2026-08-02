@@ -521,8 +521,8 @@ def layout(model):
             fail(f"external '{x['id']}' has no connected edges")
         ys = [t["y"] for t in touched]
         first, last = min(ys), max(ys)
-        x["y"] = first - 40
-        x["h"] = (last - first) + 160
+        x["y"] = first - 20
+        x["h"] = (last - first) + 120
         x["w"] = 160
         x["x"] = 0 if x["side"] == "left" else max(n["x"] for n in nodes.values()) + 160
 

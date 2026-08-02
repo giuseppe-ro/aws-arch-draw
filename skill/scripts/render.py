@@ -493,34 +493,12 @@ def layout(model):
                 result[i] = f
         return result
 
-    # collect per-node edge lists (AWS-to-AWS)
-    aws_edge_in = {n: [] for n in aws_ids}
-    aws_edge_out = {n: [] for n in aws_ids}
-    for i, e in enumerate(edges):
-        if e["from"] in aws_ids and e["to"] in aws_ids:
-            aws_edge_out[e["from"]].append(i)
-            aws_edge_in[e["to"]].append(i)
-
-    edge_fracs = {}
-    for n in aws_ids:
-        node = nodes[n]
-        out_i = aws_edge_out[n]
-        if out_i:
-            res = distribute([(i, nodes[edges[i]["to"]]["y"]) for i in out_i],
-                             node["y"])
-            for i, f in res.items():
-                edge_fracs.setdefault(i, {})["exitY"] = f
-        in_i = aws_edge_in[n]
-        if in_i:
-            res = distribute([(i, nodes[edges[i]["from"]]["y"]) for i in in_i],
-                             node["y"])
-            for i, f in res.items():
-                edge_fracs.setdefault(i, {})["entryY"] = f
-
     # ---- external box geometry ----
     # All external boxes share one uniform width (fits the longest rendered
     # label) and one uniform height (largest node-span requirement), so the
     # boxes always look consistent no matter how long an individual label is.
+    # Computed before the per-node edge distribution because the distribution
+    # uses each box's vertical center as its target row.
     ext_spans = {}
     for x in ext.values():
         touched = []
@@ -555,6 +533,39 @@ def layout(model):
         x["h"] = ext_h
         x["x"] = 0 if x["side"] == "left" else max(n["x"] for n in nodes.values()) + 160
 
+    # collect per-node edge lists (any edge incident to an AWS node, so
+    # external-boundary edges fan out exactly like AWS-to-AWS lines)
+    aws_edge_in = {n: [] for n in aws_ids}
+    aws_edge_out = {n: [] for n in aws_ids}
+    for i, e in enumerate(edges):
+        if e["from"] in aws_ids:
+            aws_edge_out[e["from"]].append(i)
+        if e["to"] in aws_ids:
+            aws_edge_in[e["to"]].append(i)
+
+    def other_y(i, as_target):
+        """Vertical position of the far endpoint, for fan-out ordering."""
+        nid = edges[i]["to"] if as_target else edges[i]["from"]
+        if nid in aws_ids:
+            return nodes[nid]["y"]
+        return ext[nid]["y"] + ext[nid]["h"] / 2
+
+    edge_fracs = {}
+    for n in aws_ids:
+        node = nodes[n]
+        out_i = aws_edge_out[n]
+        if out_i:
+            res = distribute([(i, other_y(i, as_target=True)) for i in out_i],
+                             node["y"])
+            for i, f in res.items():
+                edge_fracs.setdefault(i, {})["exitY"] = f
+        in_i = aws_edge_in[n]
+        if in_i:
+            res = distribute([(i, other_y(i, as_target=False)) for i in in_i],
+                             node["y"])
+            for i, f in res.items():
+                edge_fracs.setdefault(i, {})["entryY"] = f
+
     # ---- per-edge exitY/entryY + waypoints ----
     # Compute exitY/entryY fractions first (needed for routing-column overlap).
     edge_exit_pix = {}
@@ -579,7 +590,8 @@ def layout(model):
     # the target. Drop columns are allocated per target (nearest column first,
     # stepping left by DROP_STEP while a vertical would overlap one already
     # claimed at that column), so verticals never share pixels. Same-row and
-    # external edges keep their fixed straight geometry.
+    # external edges keep fixed straight geometry, fanned out at the source so
+    # they never overlap their sibling lines.
     DROP_STEP = 40
 
     def h_taken(y, x0, x1, used_h):
@@ -615,24 +627,31 @@ def layout(model):
 
     used_h = []
 
-    def register_fixed(src_is_aws, tgt_is_aws, src, tgt):
-        """Same-row AWS and external edges: fixed straight geometry."""
+    def register_fixed(i, src_is_aws, tgt_is_aws, src, tgt):
+        """Same-row AWS and external edges: fixed straight geometry.
+
+        External-boundary edges honor the same fan-out fractions as AWS lines
+        (edge_fracs), so they leave at a distributed height instead of every
+        line pinning center 0.5 and overlapping its siblings."""
+        fracs = edge_fracs.get(i, {})
         if src_is_aws and tgt_is_aws:
             e["exitY"], e["entryY"] = 0.5, 0.5
             e["waypoints"] = []
             claim_h(src["y"] + ICON_SIZE / 2, src["x"] + ICON_SIZE, tgt["x"], used_h)
         elif not src_is_aws and tgt_is_aws:
-            # left external -> AWS: horizontal at target center
-            e["entryY"] = 0.5
-            e["exitY"] = (tgt["y"] + ICON_SIZE / 2 - src["y"]) / src["h"]
+            # left external -> AWS: horizontal at the distributed entry height
+            e["entryY"] = fracs.get("entryY", 0.5)
+            e["exitY"] = (tgt["y"] + e["entryY"] * ICON_SIZE - src["y"]) / src["h"]
             e["waypoints"] = []
-            claim_h(tgt["y"] + ICON_SIZE / 2, src["x"] + src["w"], tgt["x"], used_h)
+            claim_h(tgt["y"] + e["entryY"] * ICON_SIZE,
+                    src["x"] + src["w"], tgt["x"], used_h)
         else:
-            # AWS -> right external: horizontal at source center
-            e["exitY"] = 0.5
-            e["entryY"] = (src["y"] + ICON_SIZE / 2 - tgt["y"]) / tgt["h"]
+            # AWS -> right external: horizontal at the distributed exit height
+            e["exitY"] = fracs.get("exitY", 0.5)
+            e["entryY"] = (src["y"] + e["exitY"] * ICON_SIZE - tgt["y"]) / tgt["h"]
             e["waypoints"] = []
-            claim_h(src["y"] + ICON_SIZE / 2, src["x"] + ICON_SIZE, tgt["x"], used_h)
+            claim_h(src["y"] + e["exitY"] * ICON_SIZE,
+                    src["x"] + ICON_SIZE, tgt["x"], used_h)
 
     for i, e in enumerate(edges):
         src_is_aws = e["from"] in aws_ids
@@ -640,7 +659,7 @@ def layout(model):
         src = nodes[e["from"]] if src_is_aws else ext[e["from"]]
         tgt = nodes[e["to"]] if tgt_is_aws else ext[e["to"]]
         if not (src_is_aws and tgt_is_aws and src["y"] != tgt["y"]):
-            register_fixed(src_is_aws, tgt_is_aws, src, tgt)
+            register_fixed(i, src_is_aws, tgt_is_aws, src, tgt)
         e["color"] = arrow_color(src, tgt)
         e["src"], e["tgt"] = src, tgt
 

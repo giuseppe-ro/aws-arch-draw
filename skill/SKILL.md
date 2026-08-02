@@ -40,12 +40,20 @@ Evidence layers, most to least trusted:
 /aws-arch-draw -h | help | --help     # show this usage
 /aws-arch-draw ignore-resource <name>  # add a resource type to the ignore list
 /aws-arch-draw enable-resource <name>  # remove a resource type from the ignore list
+/aws-arch-draw re-render              # re-render the .drawio from the current model (no discovery)
+/aws-arch-draw regenerate             # re-run discovery, diff the draft vs the model, then re-render
 ```
 
 ## What You Must Do
 
 **Skill invocation = generate an AWS architecture diagram. Start immediately.
 Do not ask what the user wants. Do not ask for confirmation.**
+
+**Route by subcommand first:** if the invocation names a subcommand
+(`ignore-resource`, `enable-resource`, `re-render`, `regenerate`, `help`), follow
+that subcommand's section below and stop — do NOT run the full generation
+workflow (Steps 1–5). Only the bare `/aws-arch-draw` invocation runs the full
+workflow.
 
 Only stop to tell the user when:
 - `graphify` is not installed
@@ -83,6 +91,50 @@ filtered out of all future diagram generations.
 ### `/aws-arch-draw enable-resource <name>`
 
 Remove `<name>` from `references/ignore-resources.txt` if present.
+
+### `/aws-arch-draw re-render`
+
+Re-render the `.drawio` from the existing `graphify-out/architecture-model.json`
+— **no discovery, no model edits**. Use this to pick up `render.py`/parser
+improvements or re-apply layout without touching ground truth.
+
+1. Locate `graphify-out/architecture-model.json` (the model) and the terraform
+   deployment directory (`deploy/`). If there is no terraform dir, use
+   `--graph graphify-out/resources.json` instead of `--tf`.
+2. Render directly:
+   ```bash
+   python3 <SKILL_DIR>/scripts/render.py graphify-out/architecture-model.json \
+     --tf deploy/ --out docs/<dirname>-architecture.drawio
+   ```
+3. Report the standard Step 5 summary (ignored resources, orphans, backward-flow
+   resolutions, warnings).
+
+If render.py hard-fails validation (the model drifted from ground truth), do
+NOT edit the model — tell the user to run `/aws-arch-draw regenerate` instead.
+
+### `/aws-arch-draw regenerate`
+
+Like `re-render`, but first refresh the authoritative draft and diff it against
+the model so drift is surfaced before rendering. The model is **never
+auto-edited** — drift is reported for the user to act on.
+
+1. Re-run discovery:
+   ```bash
+   python3 <SKILL_DIR>/scripts/render.py --discover-tf deploy/
+   ```
+   (fall back to `--discover`/graphify if there is no terraform dir).
+2. **Diff the fresh draft against `graphify-out/architecture-model.json`** and
+   report every discrepancy as a drift warning:
+   - AWS node or AWS→AWS edge in the draft but missing from the model → the
+     model is stale. List each missing id/edge and recommend running the full
+     `/aws-arch-draw` workflow to refresh it.
+   - Node or edge in the model but absent from the draft → possible resource
+     removal or a parser regression; flag it.
+   - External ids in the draft but not the model → list them (may be mergeable
+     into an existing box).
+3. Re-render to `docs/<dirname>-architecture.drawio` with the same command as
+   `re-render`.
+4. Report the drift report followed by the standard Step 5 summary.
 
 ---
 

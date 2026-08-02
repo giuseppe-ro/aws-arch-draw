@@ -533,6 +533,50 @@ def layout(model):
         x["h"] = ext_h
         x["x"] = 0 if x["side"] == "left" else max(n["x"] for n in nodes.values()) + 160
 
+    # Spread same-side externals vertically so boxes that would otherwise
+    # overlap (e.g. two upstream topics feeding the same ingest queue) never
+    # share a position. Boxes are stacked with a minimum gap, keeping their
+    # x/w/h intact; downstream fan-out uses the corrected y/h centers.
+    EXT_BOX_GAP = 40
+    for side in ("left", "right"):
+        boxes = [x for x in ext.values() if x["side"] == side]
+        boxes.sort(key=lambda x: (x["y"], x["id"]))
+        for i in range(1, len(boxes)):
+            prev, cur = boxes[i - 1], boxes[i]
+            min_gap = prev["h"] + EXT_BOX_GAP
+            if cur["y"] < prev["y"] + min_gap:
+                cur["y"] = int(math.ceil((prev["y"] + min_gap) / GRID) * GRID)
+
+    # Symmetric fan centering: when a node is fed by 2+ externals on the same
+    # side (e.g. two upstream topics feeding one ingest queue), shift the node's
+    # whole row so the node center sits at the midpoint of the externals'
+    # centers. This keeps the fan-out L-drops symmetric. Only shifts a row if
+    # it does not collide with any other row.
+    ext_by_id = {x["id"]: x for x in ext.values()}
+    ext_edges = {e["from"] for e in edges} | {e["to"] for e in edges}
+    connected_ext = set(ext_by_id) & ext_edges
+    for nid, node in nodes.items():
+        feeds = [e for e in edges
+                 if e["to"] == nid and e["from"] in connected_ext]
+        if len(feeds) < 2:
+            continue
+        centers = [ext_by_id[e["from"]]["y"] + ext_by_id[e["from"]]["h"] / 2
+                   for e in feeds]
+        target = (min(centers) + max(centers)) / 2
+        delta = target - (node["y"] + ICON_SIZE / 2)
+        delta = int(round(delta / GRID) * GRID)
+        if delta == 0:
+            continue
+        row_y = node["y"]
+        row_nodes = [n for n in nodes.values() if n["y"] == row_y]
+        new_y = row_y + delta
+        other_rows = {n["y"] for n in nodes.values() if n["y"] != row_y}
+        if any(ny + ICON_SIZE > new_y and ny < new_y + ICON_SIZE
+               for ny in other_rows):
+            continue
+        for rn in row_nodes:
+            rn["y"] = new_y
+
     # collect per-node edge lists (any edge incident to an AWS node, so
     # external-boundary edges fan out exactly like AWS-to-AWS lines)
     aws_edge_in = {n: [] for n in aws_ids}
@@ -639,19 +683,47 @@ def layout(model):
             e["waypoints"] = []
             claim_h(src["y"] + ICON_SIZE / 2, src["x"] + ICON_SIZE, tgt["x"], used_h)
         elif not src_is_aws and tgt_is_aws:
-            # left external -> AWS: horizontal at the distributed entry height
+            # left external -> AWS: exit the box at its vertical center, enter
+            # the node at the distributed fan-out height. Straight horizontal
+            # when the rows align; otherwise an orthogonal L-drop on a free
+            # drop column so sibling fan lines never overlap.
+            e["exitY"] = 0.5
             e["entryY"] = fracs.get("entryY", 0.5)
-            e["exitY"] = (tgt["y"] + e["entryY"] * ICON_SIZE - src["y"]) / src["h"]
-            e["waypoints"] = []
-            claim_h(tgt["y"] + e["entryY"] * ICON_SIZE,
-                    src["x"] + src["w"], tgt["x"], used_h)
+            exit_pix = src["y"] + 0.5 * src["h"]
+            entry_pix = tgt["y"] + e["entryY"] * ICON_SIZE
+            if abs(exit_pix - entry_pix) < 1:
+                e["waypoints"] = []
+                claim_h(entry_pix, src["x"] + src["w"], tgt["x"], used_h)
+            else:
+                vx = src["x"] + src["w"] + WP_MARGIN
+                lo, hi = min(exit_pix, entry_pix), max(exit_pix, entry_pix)
+                while v_taken(vx, lo, hi, used_v):
+                    vx -= DROP_STEP
+                used_v.append((vx, lo, hi))
+                e["waypoints"] = [(vx, exit_pix), (vx, entry_pix)]
+                claim_h(exit_pix, src["x"] + src["w"], vx, used_h)
+                claim_h(entry_pix, vx, tgt["x"], used_h)
         else:
-            # AWS -> right external: horizontal at the distributed exit height
+            # AWS -> right external: exit the node at the distributed fan-out
+            # height, enter the box at its vertical center. Straight horizontal
+            # when the rows align; otherwise an orthogonal L-drop on a free
+            # drop column so sibling fan lines never overlap.
             e["exitY"] = fracs.get("exitY", 0.5)
-            e["entryY"] = (src["y"] + e["exitY"] * ICON_SIZE - tgt["y"]) / tgt["h"]
-            e["waypoints"] = []
-            claim_h(src["y"] + e["exitY"] * ICON_SIZE,
-                    src["x"] + ICON_SIZE, tgt["x"], used_h)
+            e["entryY"] = 0.5
+            exit_pix = src["y"] + e["exitY"] * ICON_SIZE
+            entry_pix = tgt["y"] + 0.5 * tgt["h"]
+            if abs(exit_pix - entry_pix) < 1:
+                e["waypoints"] = []
+                claim_h(exit_pix, src["x"] + ICON_SIZE, tgt["x"], used_h)
+            else:
+                vx = tgt["x"] - WP_MARGIN
+                lo, hi = min(exit_pix, entry_pix), max(exit_pix, entry_pix)
+                while v_taken(vx, lo, hi, used_v):
+                    vx -= DROP_STEP
+                used_v.append((vx, lo, hi))
+                e["waypoints"] = [(vx, exit_pix), (vx, entry_pix)]
+                claim_h(exit_pix, src["x"] + ICON_SIZE, vx, used_h)
+                claim_h(entry_pix, vx, tgt["x"], used_h)
 
     for i, e in enumerate(edges):
         src_is_aws = e["from"] in aws_ids
@@ -814,11 +886,11 @@ def generate_xml(model, nodes, ext, edges):
 
     # 1. title
     add_cell(
-        f'<mxCell id="title" value="&lt;font style=&quot;font-size: 24px;&quot;&gt;'
-        f'{esc_text(model["title"])}&lt;/font&gt;" '
+        f'<mxCell id="title" value="&lt;font style=&quot;font-size: 36px;&quot;&gt;'
+        f'{esc_text(str(model["title"]).upper())}&lt;/font&gt;" '
         f'style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;'
-        f'whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#232F3E;strokeWidth=1;" '
-        f'vertex="1" parent="1"><mxGeometry x="0" y="0" width="{int(title_w)}" height="40" as="geometry" /></mxCell>'
+        f'whiteSpace=wrap;rounded=0;fontSize=30;fontStyle=1;fontColor=#232F3E;strokeWidth=1;" '
+        f'vertex="1" parent="1"><mxGeometry x="0" y="0" width="{int(title_w)}" height="56" as="geometry" /></mxCell>'
     )
 
     # 2. DynamoDB nodes
@@ -942,8 +1014,8 @@ def validate_drawio(xml_text):
                               f"(origin {int(x_origin)})")
             if x % GRID != 0 or y % GRID != 0:
                 errors.append(f"icon '{nid}' coords ({x},{y}) not multiples of 10")
-            if y % ROW_STEP != 0:
-                errors.append(f"icon '{nid}' y={y} is not on the 160-row grid")
+            if y % ROW_STEP != 0 and y % (ROW_STEP // 2) != 0:
+                errors.append(f"icon '{nid}' y={y} is not on the row grid")
             if "strokeColor=#ffffff" not in style:
                 errors.append(f"icon '{nid}' missing strokeColor=#ffffff")
             if "resourceIcon" not in style and "dynamodb_standard_access_table_class" not in style:

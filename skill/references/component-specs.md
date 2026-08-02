@@ -46,6 +46,22 @@ This file only documents the service → icon/color mapping for humans.
 |----------|-------|
 | Icon size | 80 × 80 |
 | External box width | 160 |
+| External box height | span of connected nodes + 120 |
 
 All placement, spacing, waypoint, and external-box sizing rules are implemented
 in `scripts/render.py` — see that file for the canonical values.
+
+## External box labels
+
+External boxes follow the same naming convention as the AWS nodes: a bold
+snake_case resource `name` (e.g. `almere_consignment_cancel_queue`, like
+`tam_cancel`) — never friendly prose such as "Almere Order System".
+
+The second line shows the resource type, derived from the id suffix by
+`scripts/render.py` (`_queue` → `SQS`, `_topic` → `SNS`, otherwise omitted),
+mirroring how the AWS nodes display their type (Lambda, SQS, SNS, DynamoDB).
+Set the model's `description` only to describe a non-queue/topic external (e.g.
+an on-prem TCP endpoint).
+
+`scripts/render.py` warns when an external `name` contains spaces/hyphens or
+uppercase letters (prose), and when a `description` exceeds 24 characters.

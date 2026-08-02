@@ -93,7 +93,9 @@ Take the `--discover` draft and edit it in place (see SKILL.md Step 3):
    stream→Lambda, Lambda→SNS, EventBridge→Lambda, SNS→SQS); only add
    external-boundary edges
 3. **Externals:** upstream on the left (rename/describe the auto-derived
-   `ext-upstream`), downstream consumers on the right
+   `ext-upstream`), downstream consumers on the right. External `name` follows
+   the snake_case resource convention — use the resource id, never friendly
+   prose; leave `description` empty (render.py shows the inferred SQS/SNS type)
 4. Filtering against `references/ignore-resources.txt` already happened in
    `--discover`
 

@@ -10,8 +10,8 @@ Model schema (JSON):
     "title": "My Architecture",
     "nodes":  [{"id": "sqs-order", "name": "order_ingest", "type": "sqs"}, ...],
     "edges":  [{"from": "ext-upstream", "to": "sqs-order"}, ...],
-    "externals": [{"id": "ext-upstream", "name": "WMS",
-                   "description": "Upstream feeds", "side": "left"}, ...]
+    "externals": [{"id": "ext-upstream", "name": "ext-upstream",
+                   "description": "", "side": "left"}, ...]
   }
 
 Types: sqs, sns, eventbridge, lambda, dynamodb, stepfunctions, apigateway,
@@ -712,7 +712,18 @@ def esc_text(s):
 
 
 def label_html(name, label):
-    return f"&lt;b&gt;{esc_text(name)}&lt;/b&gt;&lt;div&gt;{esc_text(label)}&lt;/div&gt;"
+    if label:
+        return f"&lt;b&gt;{esc_text(name)}&lt;/b&gt;&lt;div&gt;{esc_text(label)}&lt;/div&gt;"
+    return f"&lt;b&gt;{esc_text(name)}&lt;/b&gt;"
+
+
+def external_type(xid):
+    """Derive an external box's type line from its resource id suffix."""
+    if xid.endswith("_queue"):
+        return "SQS"
+    if xid.endswith("_topic"):
+        return "SNS"
+    return ""
 
 
 def icon_style(n):
@@ -778,8 +789,9 @@ def generate_xml(model, nodes, ext, edges):
         )
     # 5. external boxes
     for x in ext.values():
+        desc = x["description"] or external_type(x["id"])
         add_cell(
-            f'<mxCell id="{esc_text(x["id"])}" value="{label_html(x["name"], x["description"])}" '
+            f'<mxCell id="{esc_text(x["id"])}" value="{label_html(x["name"], desc)}" '
             f'style="{EXTERNAL_STYLE}" vertex="1" parent="1">'
             f'<mxGeometry x="{int(x["x"])}" y="{int(x["y"])}" width="{int(x["w"])}" height="{int(x["h"])}" as="geometry" />'
             f"</mxCell>"
@@ -1334,10 +1346,8 @@ def discover(resources_path, ignore_path=None):
     if ingest_queues:
         externals.append({
             "id": "ext-upstream",
-            "name": "Upstream SNS publisher",
-            "description": "External system publishing to SQS ingest queues "
-                           "(auto-derived from SNS subscriptions — rename to the "
-                           "real publisher, e.g. adapter)",
+            "name": "ext-upstream",
+            "description": "",
             "side": "left",
         })
         for q in sorted(ingest_queues):
@@ -1398,6 +1408,17 @@ def model_warnings(model):
                              "warning can be ignored.")
         elif not incoming[nid] and not outgoing[nid]:
             warns.append(f"node '{nid}' ({t}) has zero edges (orphan)")
+
+    for x in model.get("externals", []):
+        nm = (x.get("name") or "").strip()
+        if any(c in nm for c in " -") or any(c.isupper() for c in nm):
+            warns.append(f"external '{x['id']}' name '{nm}' is prose — use the "
+                         f"snake_case resource-style name (e.g. '{x['id']}').")
+        desc = (x.get("description") or "").strip()
+        if len(desc) > 24:
+            warns.append(f"external '{x['id']}' description is {len(desc)} chars — "
+                         f"leave it empty (render.py shows the inferred type, "
+                         f"SQS/SNS) or use a short label.")
     return warns
 
 

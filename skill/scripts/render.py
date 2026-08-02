@@ -33,6 +33,7 @@ Ground truth:
 """
 
 import json
+import math
 import os
 import sys
 import xml.etree.ElementTree as ET
@@ -78,6 +79,13 @@ DDB_STYLE = ("sketch=0;outlineConnect=0;fontColor=#232F3E;strokeColor=#ffffff;da
              "aspect=fixed;shape=mxgraph.aws4.dynamodb_standard_access_table_class;fillColor=#C925D1;"
              "gradientColor=none;pointerEvents=1;")
 EXTERNAL_STYLE = "rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontColor=#232F3E;shadow=1;dashed=1;strokeColor=#666666;fillColor=#f5f5f5;"
+EXT_FONT = 12
+EXT_CHAR_W = 7.5
+EXT_PAD_X = 24
+EXT_PAD_Y = 28
+EXT_LINE_H = 18
+EXT_MIN_W = 160
+EXT_GAP = 80
 EDGE_BASE = ("edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;"
              "strokeWidth=2;jumpStyle=arc;endArrow=classic")
 
@@ -510,6 +518,10 @@ def layout(model):
                 edge_fracs.setdefault(i, {})["entryY"] = f
 
     # ---- external box geometry ----
+    # All external boxes share one uniform width (fits the longest rendered
+    # label) and one uniform height (largest node-span requirement), so the
+    # boxes always look consistent no matter how long an individual label is.
+    ext_spans = {}
     for x in ext.values():
         touched = []
         for e in edges:
@@ -522,8 +534,25 @@ def layout(model):
         ys = [t["y"] for t in touched]
         first, last = min(ys), max(ys)
         x["y"] = first - 20
-        x["h"] = (last - first) + 120
-        x["w"] = 160
+        ext_spans[x["id"]] = (last - first) + 120
+    ext_w = EXT_MIN_W
+    for x in ext.values():
+        desc = x["description"] or external_type(x["id"])
+        for line in ([x["name"]] if not desc else [x["name"], desc]):
+            ext_w = max(ext_w, len(line) * EXT_CHAR_W + EXT_PAD_X)
+    ext_w = int(math.ceil(ext_w / 20.0) * 20)
+    ext_h = max(max(ext_spans.values(), default=0),
+                EXT_LINE_H * 2 + EXT_PAD_Y)
+    ext_h = int(math.ceil(ext_h / 20.0) * 20)
+    # Push every AWS column uniformly so each external box keeps a minimum
+    # gap (EXT_GAP) from the nearest icon. dx >= 0 always (ext_w >= EXT_MIN_W).
+    dx = (ext_w + EXT_GAP) - COL_STEP
+    if dx > 0:
+        for n in nodes.values():
+            n["x"] += dx
+    for x in ext.values():
+        x["w"] = ext_w
+        x["h"] = ext_h
         x["x"] = 0 if x["side"] == "left" else max(n["x"] for n in nodes.values()) + 160
 
     # ---- per-edge exitY/entryY + waypoints ----
@@ -754,7 +783,8 @@ def edge_geometry(e):
 def generate_xml(model, nodes, ext, edges):
     rightmost = max(n["x"] for n in nodes.values())
     lowest = max(n["y"] for n in nodes.values())
-    page_w = rightmost + 320
+    ext_right = max((x["x"] + x["w"] for x in ext.values()), default=0)
+    page_w = max(rightmost + 320, ext_right + 80)
     page_h = lowest + 320
     title_w = max(page_w, 800)
 
@@ -863,6 +893,16 @@ def validate_drawio(xml_text):
             vertices.append(el)
 
     icon_boxes = {}
+    node_xs = []
+    for el in vertices:
+        nid = el.get("id")
+        style = el.get("style", "")
+        geom = el.find("mxGeometry")
+        if geom is None:
+            continue
+        if nid != "title" and not ("rounded=1" in style and "mxgraph" not in style):
+            node_xs.append(float(geom.get("x", 0)))
+    x_origin = min(node_xs) if node_xs else 0
     for el in vertices:
         nid = el.get("id")
         style = el.get("style", "")
@@ -878,8 +918,9 @@ def validate_drawio(xml_text):
             continue
         # grid checks for AWS icons
         if not is_external:
-            if x % COL_STEP != 0:
-                errors.append(f"icon '{nid}' x={x} is not on the 240-column grid")
+            if (x - x_origin) % COL_STEP != 0:
+                errors.append(f"icon '{nid}' x={x} is not on the 240-column grid "
+                              f"(origin {int(x_origin)})")
             if x % GRID != 0 or y % GRID != 0:
                 errors.append(f"icon '{nid}' coords ({x},{y}) not multiples of 10")
             if y % ROW_STEP != 0:

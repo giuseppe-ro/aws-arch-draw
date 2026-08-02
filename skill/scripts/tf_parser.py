@@ -142,21 +142,24 @@ def external_id_for_path(path):
 
 def node_id(prefix, tf_type, res_name, t):
     """Deterministic node id from module prefix + resource identity."""
+    p = f"{prefix}_" if prefix else ""
     base = res_name
     if t == "sqs":
         base = res_name[:-6] if res_name.endswith("_queue") else res_name
-        return f"{prefix}_{base}_queue"
+        return f"{p}{base}_queue"
     if t == "sns":
         base = res_name[:-6] if res_name.endswith("_topic") else res_name
-        return f"{prefix}_{base}_topic"
-    return f"{prefix}_{res_name}"
+        return f"{p}{base}_topic"
+    return f"{p}{res_name}"
 
 
-def instance_prefix(inst):
+def instance_prefix(inst, multi=False):
     fn = inst["args"].get("factory_name", "")
     if fn and not any(c in fn for c in "{}[$\".]"):
         return fn
-    return inst["name"]
+    if multi:
+        return inst["name"]
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +200,7 @@ class Discovery:
                 "Point --discover-tf at the directory containing the terraform root."
             )
         for fp in files:
-            with open(fp, encoding="utf-8", errors="replace") as f:
+            with open(fp, encoding="utf-8-sig", errors="replace") as f:
                 text = f.read()
             blocks = scan_blocks(text, fp)
             self.blocks_by_dir.setdefault(os.path.dirname(fp), []).extend(blocks)
@@ -238,7 +241,7 @@ class Discovery:
                     self.pruned.append(f"{b['rtype']}.{b['name']} ({b['file']}:{b['line']})")
                     continue
                 for inst in insts:
-                    prefix = instance_prefix(inst) if inst else ""
+                    prefix = instance_prefix(inst, len(insts) > 1) if inst else ""
                     nid = node_id(prefix, b["rtype"], b["name"], t)
                     key = (inst["name"], b["rtype"], b["name"]) if inst else (None, b["rtype"], b["name"])
                     self.node_by_resource[key] = nid
@@ -354,6 +357,8 @@ class Discovery:
         for inst in self.instances:
             by_src.setdefault(inst["source_dir"], []).append(inst)
 
+        self._stream_consumers = self._build_stream_consumers(by_src)
+
         for mdir, blocks in self.blocks_by_dir.items():
             base = os.path.basename(mdir)
             root_dir = mdir == self.deploy_dir
@@ -372,6 +377,30 @@ class Discovery:
                 for inst in insts:
                     self._derive_block_edges(b, mdir, inst)
 
+    def _build_stream_consumers(self, by_src):
+        """Map lambda node id -> set of DDB table node ids it consumes via a
+        DDB-stream event source mapping. A stream-triggered lambda READS its
+        source table's stream; an IAM policy doc reference to that table is
+        stream-read permission, not a write target."""
+        consumers = {}
+        for mdir, blocks in self.blocks_by_dir.items():
+            if os.path.basename(mdir) in PLUMBING_MODULE_DIRS:
+                continue
+            if mdir == self.deploy_dir:
+                insts = [None]
+            else:
+                insts = by_src.get(mdir, [])
+            for inst in insts:
+                for b in blocks:
+                    if b["kind"] != "resource" or b["rtype"] != "aws_lambda_event_source_mapping":
+                        continue
+                    attrs = top_attrs(b["body"])
+                    src = self._resolve(attrs.get("event_source_arn", ""), mdir, inst)
+                    tgt = self._resolve(attrs.get("function_name", ""), mdir, inst)
+                    if src[0] == "node" and tgt[0] == "node":
+                        consumers.setdefault(tgt[1], set()).add(src[1])
+        return consumers
+
     def _derive_block_edges(self, b, mdir, inst):
         rtype, rname = b["rtype"], b["name"]
         if rtype == "aws_lambda_event_source_mapping":
@@ -388,7 +417,10 @@ class Discovery:
             lambda_nid = self._lambda_for_policydoc(rname, inst)
             if not lambda_nid:
                 return
+            skip = self._stream_consumers.get(lambda_nid, set())
             for table in self._ddb_refs(b["body"], inst):
+                if table in skip:
+                    continue
                 self._add_edge(("node", lambda_nid), ("node", table), "write",
                                f"{b['file']}:{b['line']} iam policy doc {rname}")
         elif rtype == "aws_lambda_function":
@@ -398,7 +430,7 @@ class Discovery:
             if not lambda_nid:
                 return
             for vname, val in env_vars(b["body"]).items():
-                if "TOPIC" not in vname and "_ARN" not in vname:
+                if not any(k in vname for k in ("TOPIC", "_ARN", "_SQS_URL", "_QUEUE_URL")):
                     continue
                 r = self._resolve(val, mdir, inst)
                 if r[0] in ("node", "external"):

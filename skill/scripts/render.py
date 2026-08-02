@@ -77,7 +77,7 @@ DDB_STYLE = ("sketch=0;outlineConnect=0;fontColor=#232F3E;strokeColor=#ffffff;da
              "shadow=1;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=12;fontStyle=0;"
              "aspect=fixed;shape=mxgraph.aws4.dynamodb_standard_access_table_class;fillColor=#C925D1;"
              "gradientColor=none;pointerEvents=1;")
-EXTERNAL_STYLE = "rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontColor=#232F3E;shadow=1;"
+EXTERNAL_STYLE = "rounded=1;whiteSpace=wrap;html=1;fontSize=12;fontColor=#232F3E;shadow=1;dashed=1;strokeColor=#666666;fillColor=#f5f5f5;"
 EDGE_BASE = ("edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;"
              "strokeWidth=2;jumpStyle=arc;endArrow=classic")
 

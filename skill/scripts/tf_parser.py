@@ -150,6 +150,9 @@ def node_id(prefix, tf_type, res_name, t):
     if t == "sns":
         base = res_name[:-6] if res_name.endswith("_topic") else res_name
         return f"{p}{base}_topic"
+    if t == "eventbridge":
+        base = res_name[:-8] if res_name.endswith("_schedule") else res_name
+        return f"{p}{base}_schedule"
     return f"{p}{res_name}"
 
 
@@ -255,6 +258,7 @@ class Discovery:
         e = expr.strip().strip('"')
         if not e:
             return ("unknown", None)
+        e = re.sub(r"\[[a-z0-9._]+\]", "", e)
         m = re.fullmatch(r"(aws_[a-z0-9_]+)\.([a-zA-Z0-9_-]+)\.(?:arn|id|name|.*)", e)
         if m:
             key = (inst["name"] if inst else None, m.group(1), m.group(2))
@@ -413,6 +417,11 @@ class Discovery:
             topic = self._resolve(attrs.get("topic_arn", ""), mdir, inst)
             endp = self._resolve(attrs.get("endpoint", ""), mdir, inst)
             self._add_edge(topic, endp, "sns-sub", f"{b['file']}:{b['line']}")
+        elif rtype == "aws_cloudwatch_event_target":
+            attrs = top_attrs(b["body"])
+            rule = self._resolve(attrs.get("rule", ""), mdir, inst)
+            tgt = self._resolve(attrs.get("arn", ""), mdir, inst)
+            self._add_edge(rule, tgt, "eventbridge-schedule", f"{b['file']}:{b['line']}")
         elif rtype == "aws_iam_policy_document":
             lambda_nid = self._lambda_for_policydoc(rname, inst)
             if not lambda_nid:

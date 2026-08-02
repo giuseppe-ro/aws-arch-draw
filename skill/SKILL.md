@@ -171,7 +171,7 @@ drifts from ground truth).
     {"from": "aws-lambda-function-order-ingest", "to": "aws-dynamodb-table-mutation"}
   ],
   "externals": [
-    {"id": "ext-upstream", "name": "WMS", "description": "Upstream SNS event feeds", "side": "left"}
+    {"id": "ext-upstream", "name": "ext-upstream", "description": "", "side": "left"}
   ]
 }
 ```
@@ -187,14 +187,20 @@ Rules (the ONLY judgment the model does):
 2. **Keep every AWS→AWS edge from the draft** exactly as-is (triggers, DDB
    streams, EventBridge rules, SNS→SQS fan-out, Lambda→DDB writes). Do not
    re-target or drop any, and never add an AWS→AWS edge that is not in the draft.
-3. **Externals** = systems/queues/topics outside this component's ownership:
+ 3. **Externals** = systems/queues/topics outside this component's ownership:
    upstream publishers and inbound queues/topics on the left, downstream
    consumers and publish targets on the right. The draft already contains every
    ARN referenced via config; you may rename/describe each box and merge boxes
    that represent the same external system. **Check for downstream externals the
    draft cannot infer** — e.g. on-prem TCP endpoints the lambdas dial out to, or
    topics published from the code — and add them as right-side boxes with their
-   boundary edges.
+   boundary edges. External boxes follow the **same naming convention as the AWS
+   nodes**: `name` is the snake_case resource id (e.g. `almere_consignment_cancel_queue`,
+   like `tam_cancel`) — never friendly prose such as "Almere Order System". Leave
+   `description` empty; render.py derives the type line (`SQS`/`SNS`) from the id
+   suffix (`_queue`/`_topic`) exactly like the AWS nodes show their type. Set
+   `description` only to describe a non-queue/topic external (e.g. an on-prem TCP
+   endpoint).
 4. **DDB stream edge rule (CRITICAL):** a DDB→Lambda edge exists ONLY where an
    `aws_lambda_event_source_mapping` references that DDB table as its source.
    The draft already includes every confirmed one — never guess or invent a

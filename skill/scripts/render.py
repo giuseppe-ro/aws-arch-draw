@@ -369,16 +369,21 @@ def layout(model):
         if n not in visited and n not in shared:
             chains.append([n])
 
-    # ---- order chains by terminal depth, then input order ----
+    # ---- order chains by terminal depth, then shared-resource group ----
+    # Group chains by which shared resource they feed into, so writers of the
+    # same table land on adjacent rows and cross-row edges stay short enough
+    # for clean L-paths instead of falling back to messy Z-paths.
+    idx = {n["id"]: i for i, n in enumerate(model["nodes"])}
+    shared_sorted = sorted(shared, key=lambda s: (depth[s], idx.get(s, 10**9)))
+    shared_group = {s: g for g, s in enumerate(shared_sorted)}
+
     def terminal_depth(chain):
         for i in range(len(chain) - 1, -1, -1):
             node = chain[i]
             for t in outgoing[node]:
                 if t in shared:
-                    return depth[t]
-        return 10 ** 9
-
-    idx = {n["id"]: i for i, n in enumerate(model["nodes"])}
+                    return (depth[t], shared_group[t])
+        return (10**9, 10**9)
 
     def chain_key(c):
         return (terminal_depth(c), idx.get(c[0], 10 ** 9))
@@ -610,6 +615,22 @@ def layout(model):
             for i, f in res.items():
                 edge_fracs.setdefault(i, {})["entryY"] = f
 
+    # Left-external boxes fan out to several AWS nodes: distribute the exit
+    # height across the box (like AWS outgoing edges) so sibling lines leave at
+    # distinct heights instead of all pinning center 0.5 and overlapping.
+    ext_out = {}
+    for x in ext.values():
+        if x["side"] != "left":
+            continue
+        out_i = [i for i, e in enumerate(edges) if e["from"] == x["id"]]
+        if out_i:
+            ext_out[x["id"]] = out_i
+    for xid, out_i in ext_out.items():
+        res = distribute([(i, other_y(i, as_target=True)) for i in out_i],
+                         ext[xid]["y"] + ext[xid]["h"] / 2)
+        for i, f in res.items():
+            edge_fracs.setdefault(i, {})["exitY"] = f
+
     # ---- per-edge exitY/entryY + waypoints ----
     # Compute exitY/entryY fractions first (needed for routing-column overlap).
     edge_exit_pix = {}
@@ -683,19 +704,19 @@ def layout(model):
             e["waypoints"] = []
             claim_h(src["y"] + ICON_SIZE / 2, src["x"] + ICON_SIZE, tgt["x"], used_h)
         elif not src_is_aws and tgt_is_aws:
-            # left external -> AWS: exit the box at its vertical center, enter
-            # the node at the distributed fan-out height. Straight horizontal
-            # when the rows align; otherwise an orthogonal L-drop on a free
-            # drop column so sibling fan lines never overlap.
-            e["exitY"] = 0.5
+            # left external -> AWS: exit the box at the distributed fan-out
+            # height, enter the node at its distributed fan-out height. The drop
+            # column is anchored to the TARGET node (nearest column left of it)
+            # so sibling fan lines from a wide box never collide near the box.
+            e["exitY"] = fracs.get("exitY", 0.5)
             e["entryY"] = fracs.get("entryY", 0.5)
-            exit_pix = src["y"] + 0.5 * src["h"]
+            exit_pix = src["y"] + e["exitY"] * src["h"]
             entry_pix = tgt["y"] + e["entryY"] * ICON_SIZE
             if abs(exit_pix - entry_pix) < 1:
                 e["waypoints"] = []
                 claim_h(entry_pix, src["x"] + src["w"], tgt["x"], used_h)
             else:
-                vx = src["x"] + src["w"] + WP_MARGIN
+                vx = tgt["x"] - WP_MARGIN
                 lo, hi = min(exit_pix, entry_pix), max(exit_pix, entry_pix)
                 while v_taken(vx, lo, hi, used_v):
                     vx -= DROP_STEP
@@ -757,6 +778,8 @@ def layout(model):
         if ok and (h_taken(exit_pix, src_right, vx, used_h) or
                    h_taken(entry_pix, vx, tgt["x"], used_h)):
             ok = False
+        if ok and (vx - src_right < WP_MARGIN or tgt["x"] - vx < WP_MARGIN):
+            ok = False
         if ok:
             e["waypoints"] = [(vx, exit_pix), (vx, entry_pix)]
             claim_h(exit_pix, src_right, vx, used_h)
@@ -768,7 +791,8 @@ def layout(model):
         lo, hi = min(exit_pix, entry_pix), max(exit_pix, entry_pix)
         mid = (exit_pix + entry_pix) / 2
         lanes = sorted((k * ROW_STEP + 120
-                        for k in range(int(lo // ROW_STEP), int(hi // ROW_STEP))),
+                        for k in range(int(lo // ROW_STEP) - 1,
+                                       int(hi // ROW_STEP) + 1)),
                        key=lambda y: abs(y - mid))
         for bridge in lanes:
             if h_taken(bridge, src_right, tgt["x"], used_h):
@@ -1174,7 +1198,7 @@ IGNORED_PREFIX = (
 # notification topics/alarms. Keep the underscore forms so they match Terraform
 # addresses like `aws_sqs_queue.order_ingest_dlq` or `aws_sns_topic.inventory_alerts`.
 DLQ_MARKERS = (
-    "_dlq", "_failures", "smoke_", "fake_",
+    "_dlq", "_failures", "smoke_",
     "_alerts", "_alert", "_alarm", "notification",
 )
 

@@ -216,7 +216,8 @@ class Discovery:
                     continue
                 source_dir = os.path.normpath(os.path.join(os.path.dirname(fp), src))
                 inst = {"name": b["name"], "source_dir": source_dir,
-                        "args": args, "file": fp}
+                        "args": args, "file": fp,
+                        "parent_dir": os.path.dirname(fp)}
                 self.instances.append(inst)
                 self.inst_by_name[inst["name"]] = inst
 
@@ -254,6 +255,34 @@ class Discovery:
 
     # ---- reference resolution ----
 
+    def _nested_deployed(self, inst, parent):
+        """True if the nested module `inst` is actually deployed under `parent`.
+
+        Mirrors `count = var.<flag> ? 1 : 0` in the nested module block: when
+        `count` is gated on a parent-module flag, a `false`/`0` value for that
+        flag means the child module has zero instances under this parent, so its
+        resources must not be resolved in the parent's scope."""
+        count = (inst.get("args", {}).get("count") or "").strip()
+        m = re.fullmatch(r"var\.([a-zA-Z0-9_]+)\s*\?\s*1\s*:\s*0", count)
+        if not m:
+            return True
+        flag = m.group(1)
+        val = (parent.get("args", {}).get(flag) or "").strip().strip('"').lower()
+        return val not in ("false", "0", "", "null")
+
+    def _parent_instances(self, inst):
+        """Instances that instantiate the directory `inst`'s module block lives
+        in, restricted to parents under which `inst` is deployed."""
+        if not inst:
+            return []
+        parents = []
+        for p in self.instances:
+            if p is inst:
+                continue
+            if p["source_dir"] == inst.get("parent_dir") and self._nested_deployed(inst, p):
+                parents.append(p)
+        return parents
+
     def _resolve(self, expr, mdir, inst):
         e = expr.strip().strip('"')
         if not e:
@@ -261,8 +290,14 @@ class Discovery:
         e = re.sub(r"\[[a-z0-9._]+\]", "", e)
         m = re.fullmatch(r"(aws_[a-z0-9_]+)\.([a-zA-Z0-9_-]+)\.(?:arn|id|name|.*)", e)
         if m:
-            key = (inst["name"] if inst else None, m.group(1), m.group(2))
+            rtype, rname = m.group(1), m.group(2)
+            key = (inst["name"] if inst else None, rtype, rname)
             nid = self.node_by_resource.get(key)
+            if not nid and inst:
+                for p in self._parent_instances(inst):
+                    nid = self.node_by_resource.get((p["name"], rtype, rname))
+                    if nid:
+                        break
             return ("node", nid) if nid else ("unknown", None)
         if e.startswith("var.config."):
             eid = external_id_for_path(e[len("var.config."):])
@@ -438,10 +473,16 @@ class Discovery:
             lambda_nid = self.node_by_resource.get(key)
             if not lambda_nid:
                 return
+            consume = self._stream_consumers.get(lambda_nid, set())
             for vname, val in env_vars(b["body"]).items():
                 if not any(k in vname for k in ("TOPIC", "_ARN", "_SQS_URL", "_QUEUE_URL")):
                     continue
                 r = self._resolve(val, mdir, inst)
+                if r[0] == "node" and r[1] in consume:
+                    # the queue this lambda consumes via its event source
+                    # mapping — an env-var reference to it is a read target,
+                    # not a publish target. Skip the reverse edge.
+                    continue
                 if r[0] in ("node", "external"):
                     self._add_edge(("node", lambda_nid), r, "publish",
                                    f"{b['file']}:{b['line']} env {vname}")

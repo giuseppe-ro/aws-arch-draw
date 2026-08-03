@@ -61,7 +61,7 @@ automatically — you never hand-edit coordinates or the `.drawio` XML.
 
 ## Where to go deeper
 
-- `skill/README.md` — full technical reference: model schema, discovery rules,
+- `skill/aws-arch-draw/README.md` — full technical reference: model schema, discovery rules,
   validation contract, and how `scripts/render.py` + `scripts/tf_parser.py`
   work.
 - `skill/SKILL.md` — the skill definition loaded by opencode.

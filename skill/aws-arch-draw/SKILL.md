@@ -15,8 +15,9 @@ graphify knowledge graph — left-to-right flow, 80×80 AWS icons, color-coded
 edges, distributed entry points, external system boxes.
 
 Accuracy is a hard gate: the diagram is only rendered when the model can be
-diffed against ground truth — the project's terraform (`--discover-tf
-deploy/`, authoritative) or graphify's `resources.json` (`--discover`).
+diffed against ground truth — the project's terraform (`--discover-tf deploy/`)
+or graphify's `resources.json` (`--discover`). At render time a `resources.json`
+(auto-detected or passed with `--graph`) takes precedence over `--tf`.
 
 **All layout math, geometry, colors, XML escaping, discovery, and validation
 live in `scripts/render.py` + `scripts/tf_parser.py`. The model does NOT compute
@@ -99,8 +100,8 @@ Re-render the `.drawio` from the existing `graphify-out/architecture-model.json`
 improvements or re-apply layout without touching ground truth.
 
 1. Locate `graphify-out/architecture-model.json` (the model) and the terraform
-   deployment directory (`deploy/`). If there is no terraform dir, use
-   `--graph graphify-out/resources.json` instead of `--tf`.
+   deployment directory (`deploy/`). A `resources.json` found near the model
+   wins over `--tf`; use `--graph <path>` to pick a specific graph resources file.
 2. Render directly:
    ```bash
    python3 <SKILL_DIR>/scripts/render.py graphify-out/architecture-model.json \
@@ -274,10 +275,9 @@ python3 <SKILL_DIR>/scripts/render.py graphify-out/architecture-model.json \
   --tf deploy/ --out docs/<dirname>-architecture.drawio
 ```
 
-Pass `--tf <deploy-dir>` to validate the model against the terraform-derived
-ground truth (the same source used for discovery). If the project has no
-terraform, omit it and render.py will look for `graphify-out/resources.json`
-(override with `--graph <path>`).
+render.py validates against a `graphify-out/resources.json` found near the
+model (or `--graph <path>`) when one exists; `--tf <deploy-dir>` is used only
+when no graph resources file is found. If neither exists it exits 3.
 
 render.py computes the layout, emits the XML, and runs the entire pre-save
 checklist (grid alignment, left-to-right flow, anchors, waypoint math, external
@@ -302,8 +302,7 @@ XML, and re-run.
 status 3 (`UNVERIFIED: no ground truth available`), no `resources.json` and no
 `--tf` input exists. Do not save an unverified diagram. Ask the user how to
 proceed, offering: (a) point the skill at the terraform dir
-(`--discover-tf deploy/`), (b) provide a `resources.json`, (c) proceed with a
-clearly watermarked draft via `--allow-unverified`, or (d) abort.
+(`--discover-tf deploy/`), (b) provide a `resources.json`, or (c) abort.
 
 render.py detects **cycles** in the AWS edges and fails with the cycle listed
 instead of looping forever. A cycle almost always means a hallucinated/reversed

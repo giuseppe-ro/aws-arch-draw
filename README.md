@@ -10,7 +10,8 @@ Given a project that deploys AWS infrastructure (SQS, SNS, Lambda, DynamoDB,
 EventBridge, …), the skill:
 
 1. Discovers the real architecture from your **terraform deployment code**
-   (authoritative) or the project's **graphify** knowledge graph.
+   or the project's **graphify** knowledge graph. At render time graphify's
+   `resources.json` wins when both are available.
 2. Draws the diagram as a `.drawio` file you can open in draw.io.
 
 ## Accuracy guarantee
@@ -64,4 +65,4 @@ automatically — you never hand-edit coordinates or the `.drawio` XML.
 - `skill/aws-arch-draw/README.md` — full technical reference: model schema, discovery rules,
   validation contract, and how `scripts/render.py` + `scripts/tf_parser.py`
   work.
-- `skill/SKILL.md` — the skill definition loaded by opencode.
+- `skill/aws-arch-draw/SKILL.md` — the skill definition loaded by opencode.

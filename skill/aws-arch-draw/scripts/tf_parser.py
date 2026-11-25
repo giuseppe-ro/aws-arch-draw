@@ -3,7 +3,7 @@
 
 Parses a deploy/ directory of HCL and emits an authoritative architecture
 draft: AWS nodes (id/name/type), AWS->AWS edges (with evidence), and externals
-(resources referenced via var./local.config./bare ARNs).
+(resources referenced via `*_arn` config paths through var./local./module.).
 
 Design notes
 ------------

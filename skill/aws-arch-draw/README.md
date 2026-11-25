@@ -5,8 +5,10 @@ code and graphify knowledge graph — left-to-right flow, 80×80 AWS icons,
 color-coded edges, distributed entry points, and external system boxes.
 
 Accuracy is a hard gate: the diagram is only rendered when the model can be
-diffed against ground truth — the project's terraform (`--discover-tf deploy/`,
-authoritative) or graphify's `resources.json` (`--discover`).
+diffed against ground truth — the project's terraform (`--discover-tf deploy/`)
+or graphify's `resources.json` (`--discover`). At render time `resources.json`
+takes precedence: when one is found (auto-detected or via `--graph`), `--tf` is
+ignored.
 
 The core contract: **all layout math, geometry, colors, XML escaping,
 discovery, and validation live in the scripts. The model (LLM) only annotates
@@ -74,7 +76,7 @@ dropping an edge fails the render.
 - **Nodes** from supported resource types (`ADDRESS_TYPE` in render.py), with
   module-instance expansion (`factory_name` argument prefixes the node id;
   single-instance modules are unprefixed).
-- **Externals** from any ARN resolved through `var.*` / `local.*` / `module.*`
+- **Externals** from `*_arn` config paths resolved through `var.*` / `local.*` / `module.*`
   (e.g. `local.config.tamworth_consignment_sent_queue_arn`).
 - **Edges**, each with `kind @ file:line` evidence:
   - `aws_lambda_event_source_mapping` → SQS/DDB → Lambda trigger edges,
@@ -85,7 +87,7 @@ dropping an edge fails the render.
   - `aws_lambda_function` env vars (`*_TOPIC`, `*_ARN`, `*_SQS_URL`,
     `*_QUEUE_URL`) → publish targets.
 
-### Graphify fallback (`--discover`)
+### Graphify (`--discover`)
 
 `--discover` reads `resources.json` and additionally derives from `graph.json`:
 DDB-stream + SQS→Lambda triggers (`read_trigger_edges`), EventBridge rules
@@ -148,10 +150,11 @@ python3 <SKILL_DIR>/scripts/render.py graphify-out/architecture-model.json \
   inventory and hard-fails when the model contains a fabricated node, an
   unsupported AWS→AWS edge, a missing authoritative edge, or a node whose
   name/type drifts from ground truth. Fix the **model**, never the XML.
+  A `resources.json` found near the model (or passed with `--graph`) is used
+  before `--tf`.
 - **No ground truth → exit 3** (`UNVERIFIED`). render.py refuses to save an
   unverified diagram; the caller asks the user how to proceed (point at the
-  terraform dir, provide `resources.json`, `--allow-unverified` for a
-  watermarked draft, or abort).
+  terraform dir, provide `resources.json`, or abort).
 - **Cycles** — detected and reported instead of looping. A cycle almost always
   means a hallucinated/reversed DDB stream edge.
 - **Warnings** — orphan nodes, tables with no writers, prose external names,
@@ -203,7 +206,7 @@ render-time prune so a hand-authored model cannot reintroduce it:
 
 - `references/ignore-resources.txt` (e.g. `kms`, `sqs dlq`, `iam role`,
   `alerts`, `alarm`, `notification`).
-- `DLQ_MARKERS` in render.py: `_dlq`, `_failures`, `smoke_`, `fake_`, `_alerts`,
+- `DLQ_MARKERS` in render.py: `_dlq`, `_failures`, `smoke_`, `_alerts`,
   `_alert`, `_alarm`, `notification`.
 - `IGNORED_PREFIX`: `aws_iam_`, `aws_kms_`, `aws_cloudwatch_`, subscriptions,
   queue policies, event source mappings, lambda permissions, SSM params,
